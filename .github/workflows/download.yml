@@ -4,6 +4,8 @@ on:
   push:
     paths:
       - video_url.txt
+      - downloader.py
+      - .github/workflows/download.yml
 
 jobs:
   download:

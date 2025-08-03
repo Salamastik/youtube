@@ -1,0 +1,31 @@
+name: Download YouTube Video
+
+on:
+  push:
+    paths:
+      - video_url.txt
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run downloader
+        run: python downloader.py
+
+      - name: Upload video as artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: downloaded-video
+          path: downloads/

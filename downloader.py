@@ -1,21 +1,20 @@
-from pytube import YouTube
+import subprocess
 import os
 
 url_file = "video_url.txt"
 output_path = "downloads"
 
-if not os.path.exists(url_file):
-    raise FileNotFoundError("video_url.txt לא נמצא")
+os.makedirs(output_path, exist_ok=True)
 
 with open(url_file, "r") as f:
     url = f.read().strip()
 
 print(f"Attempting to download from: {url}")
-yt = YouTube(url)
-print(f" from: {yt}")
-stream = yt.streams.get_highest_resolution()
-
-os.makedirs(output_path, exist_ok=True)
-print(f"מוריד את: {yt.title}")
-stream.download(output_path=output_path)
-print("סיום.")
+try:
+    subprocess.run([
+        "yt-dlp",
+        "-o", f"{output_path}/%(title)s.%(ext)s",
+        url
+    ], check=True)
+except subprocess.CalledProcessError as e:
+    print("Download failed:", e)

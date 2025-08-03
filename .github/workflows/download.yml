@@ -4,8 +4,6 @@ on:
   push:
     paths:
       - video_url.txt
-      - downloader.py
-      - .github/workflows/download.yml
 
 jobs:
   download:
@@ -20,8 +18,8 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: Install yt-dlp
+        run: pip install yt-dlp
 
       - name: Run downloader
         run: python downloader.py

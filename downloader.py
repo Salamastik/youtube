@@ -10,7 +10,9 @@ if not os.path.exists(url_file):
 with open(url_file, "r") as f:
     url = f.read().strip()
 
+print(f"Attempting to download from: {url}")
 yt = YouTube(url)
+print(f" from: {yt}")
 stream = yt.streams.get_highest_resolution()
 
 os.makedirs(output_path, exist_ok=True)

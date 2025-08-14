@@ -1,6 +1,23 @@
 name: Download YouTube Video
 
+run-name: Download ${{ github.event.inputs.format || 'video' }} from YouTube
+
 on:
+  workflow_dispatch:
+    inputs:
+      video_url:
+        description: 'YouTube URL'
+        required: true
+        type: string
+        default: 'https://www.youtube.com/watch?v=example'
+      format:
+        description: 'Download format'
+        required: true
+        type: choice
+        options:
+        - 'video'
+        - 'audio (MP3)'
+        default: 'video'
   push:
     paths:
       - video_url.txt
@@ -23,8 +40,11 @@ jobs:
         with:
           python-version: "3.11"
           
-      - name: Install yt-dlp
-        run: pip install yt-dlp
+      - name: Install yt-dlp and ffmpeg
+        run: |
+          pip install yt-dlp
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
         
       - name: Create cookies file (if secret exists)
         run: |
@@ -35,15 +55,25 @@ jobs:
             echo "⚠️ No cookies secret found - download might fail"
           fi
         
-      - name: Check if video_url.txt exists
+      - name: Create video_url.txt from input
         run: |
-          if [ ! -f video_url.txt ]; then
-            echo "❌ video_url.txt file not found!"
+          if [ "${{ github.event.inputs.video_url }}" != "" ]; then
+            echo "📝 Creating video_url.txt from manual input"
+            if [ "${{ github.event.inputs.format }}" = "audio (MP3)" ]; then
+              echo "${{ github.event.inputs.video_url }} MP3" > video_url.txt
+            else
+              echo "${{ github.event.inputs.video_url }}" > video_url.txt
+            fi
+            echo "✅ Created video_url.txt with content:"
+            cat video_url.txt
+          elif [ -f video_url.txt ]; then
+            echo "✅ Using existing video_url.txt file"
+            echo "Content:"
+            cat video_url.txt
+          else
+            echo "❌ No URL provided via input or file!"
             exit 1
           fi
-          echo "✅ video_url.txt exists"
-          echo "URL to download:"
-          cat video_url.txt
           
       - name: Run downloader
         run: python downloader.py
@@ -51,6 +81,6 @@ jobs:
       - name: Upload video as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: downloaded-video
+          name: downloaded-${{ github.event.inputs.format == 'audio (MP3)' && 'audio' || 'video' }}-${{ github.run_number }}
           path: downloads/
           if-no-files-found: error

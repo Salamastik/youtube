@@ -7,6 +7,10 @@ on:
       - downloader.py
       - .github/workflows/download.yml
 
+permissions:
+  contents: write
+  actions: write
+
 jobs:
   download:
     runs-on: ubuntu-latest

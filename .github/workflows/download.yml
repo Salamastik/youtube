@@ -14,24 +14,43 @@ permissions:
 jobs:
   download:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout Repo
-        uses: actions/checkout@v3
-
+        uses: actions/checkout@v4
+        
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: "3.11"
-
+          
       - name: Install yt-dlp
         run: pip install yt-dlp
-
+        
+      - name: Create cookies file (if secret exists)
+        run: |
+          if [ -n "${{ secrets.YOUTUBE_COOKIES }}" ]; then
+            echo "🍪 Creating cookies file from secret"
+            echo "${{ secrets.YOUTUBE_COOKIES }}" > cookies.txt
+          else
+            echo "⚠️ No cookies secret found - download might fail"
+          fi
+        
+      - name: Check if video_url.txt exists
+        run: |
+          if [ ! -f video_url.txt ]; then
+            echo "❌ video_url.txt file not found!"
+            exit 1
+          fi
+          echo "✅ video_url.txt exists"
+          echo "URL to download:"
+          cat video_url.txt
+          
       - name: Run downloader
         run: python downloader.py
-
+        
       - name: Upload video as artifact
         uses: actions/upload-artifact@v4
         with:
           name: downloaded-video
           path: downloads/
+          if-no-files-found: error

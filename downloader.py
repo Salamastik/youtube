@@ -2,10 +2,10 @@ import subprocess
 import os
 import sys
 
-
 def main():
     url_file = "video_url.txt"
     output_path = "downloads"
+    cookies_file = "cookies.txt"  # קובץ cookies אופציונלי
     
     # בדיקה אם קובץ ה-URL קיים
     if not os.path.exists(url_file):
@@ -30,17 +30,32 @@ def main():
     
     print(f"📥 Trying to download video from: {url}")
     
-    # הרצת yt-dlp עם אופציות משופרות
+    # בניית פקודת yt-dlp
+    cmd = [
+        "yt-dlp",
+        "--verbose",
+        "--format", "best[height<=480]",  # איכות נמוכה יותר כדי להקל
+        "--output", f"{output_path}/%(title)s.%(ext)s",
+        "--no-playlist",
+        "--ignore-errors",
+        "--no-check-certificates",  # מתעלם מבעיות SSL
+        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",  # User agent של דפדפן
+        "--sleep-interval", "1",  # המתנה בין בקשות
+        "--max-sleep-interval", "3",
+        url
+    ]
+    
+    # אם יש קובץ cookies, הוסף אותו
+    if os.path.exists(cookies_file):
+        print("🍪 Using cookies file")
+        cmd.insert(-1, "--cookies")
+        cmd.insert(-1, cookies_file)
+    else:
+        print("⚠️ No cookies file found - this might cause authentication issues")
+    
+    # הרצת yt-dlp
     try:
-        result = subprocess.run([
-            "yt-dlp",
-            "--verbose",  # verbose logging
-            "--format", "best[height<=720]",  # איכות מוגבלת לחיסכון בזמן ומקום
-            "--output", f"{output_path}/%(title)s.%(ext)s",  # שם קובץ עם שם הוידאו
-            "--no-playlist",  # מוריד רק וידאו אחד גם אם זה חלק מפלייליסט
-            "--ignore-errors",  # ממשיך גם אם יש שגיאות קטנות
-            url
-        ], check=True, capture_output=True, text=True, timeout=600)  # timeout של 10 דקות
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=900)  # 15 דקות
         
         print("✅ yt-dlp completed successfully!")
         print("----- STDOUT -----")
@@ -51,17 +66,37 @@ def main():
             print(result.stderr)
             
     except subprocess.TimeoutExpired:
-        print("❌ Download timed out (over 10 minutes)!")
+        print("❌ Download timed out (over 15 minutes)!")
         sys.exit(1)
         
     except subprocess.CalledProcessError as e:
         print("❌ Download failed!")
         print(f"Return code: {e.returncode}")
-        print("----- STDOUT -----")
-        print(e.stdout if e.stdout else "No stdout")
-        print("----- STDERR -----")
-        print(e.stderr if e.stderr else "No stderr")
-        sys.exit(1)
+        
+        # נסה עם אופציות חלופיות
+        print("\n🔄 Trying alternative method...")
+        try:
+            alt_cmd = [
+                "yt-dlp",
+                "--format", "worst",  # איכות הכי נמוכה
+                "--output", f"{output_path}/%(id)s.%(ext)s",  # שם פשוט יותר
+                "--no-playlist",
+                "--ignore-errors",
+                "--extractor-args", "youtube:skip=dash",  # דילוג על DASH formats
+                url
+            ]
+            
+            alt_result = subprocess.run(alt_cmd, check=True, capture_output=True, text=True, timeout=600)
+            print("✅ Alternative method succeeded!")
+            print(alt_result.stdout)
+            
+        except Exception as alt_e:
+            print("❌ Alternative method also failed!")
+            print("----- ORIGINAL STDOUT -----")
+            print(e.stdout if e.stdout else "No stdout")
+            print("----- ORIGINAL STDERR -----")
+            print(e.stderr if e.stderr else "No stderr")
+            sys.exit(1)
         
     except Exception as e:
         print(f"❌ Unexpected error: {e}")

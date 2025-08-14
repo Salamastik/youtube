@@ -40,11 +40,13 @@ jobs:
         with:
           python-version: "3.11"
           
-      - name: Install yt-dlp and ffmpeg
+      - name: Install yt-dlp, ffmpeg and dependencies
         run: |
-          pip install yt-dlp
+          pip install yt-dlp requests
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg tor proxychains-ng
+          # עדכון yt-dlp לגרסה החדשה ביותר
+          pip install --upgrade yt-dlp
         
       - name: Create cookies file (if secret exists)
         run: |
@@ -54,8 +56,18 @@ jobs:
           else
             echo "⚠️ No cookies secret found - download might fail"
           fi
-        
-      - name: Create video_url.txt from input
+      - name: Setup alternative methods
+        run: |
+          # יצירת רשימת User Agents
+          echo "Preparing anti-detection methods..."
+          
+          # בדיקת גרסת yt-dlp
+          echo "yt-dlp version:"
+          yt-dlp --version
+          
+          # בדיקת רשת
+          echo "Network test:"
+          curl -s "https://www.youtube.com" | head -n 1 || echo "YouTube connection issue"
         run: |
           if [ "${{ github.event.inputs.video_url }}" != "" ]; then
             echo "📝 Creating video_url.txt from manual input"

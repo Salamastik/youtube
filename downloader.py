@@ -15,35 +15,66 @@ def main():
     # יצירת התיקייה אם לא קיימת
     os.makedirs(output_path, exist_ok=True)
     
-    # קריאת כתובת הוידאו
+    # קריאת כתובת הוידאו ופורמט
     try:
         with open(url_file, "r", encoding='utf-8') as f:
-            url = f.read().strip()
+            content = f.read().strip()
     except Exception as e:
         print(f"❌ Error reading {url_file}: {e}")
         sys.exit(1)
     
-    # בדיקה אם ה-URL לא ריק
-    if not url:
+    # בדיקה אם התוכן לא ריק
+    if not content:
         print(f"❌ Error: {url_file} is empty!")
         sys.exit(1)
     
-    print(f"📥 Trying to download video from: {url}")
+    # פיצול התוכן לURL ופורמט
+    parts = content.split()
+    url = parts[0]
+    
+    # בדיקה אם יש בקשה לMP3
+    download_format = "video"  # default
+    if len(parts) > 1:
+        format_request = parts[1].upper()
+        if format_request == "MP3":
+            download_format = "audio"
+            print("📋 MP3 format requested")
+        else:
+            print(f"📋 Unknown format '{parts[1]}', defaulting to video")
+    else:
+        print("📋 No format specified, defaulting to video")
+    
+    print(f"📥 Trying to download {'audio' if download_format == 'audio' else 'video'} from: {url}")
     
     # בניית פקודת yt-dlp
     cmd = [
         "yt-dlp",
         "--verbose",
-        "--format", "best[height<=480]",  # איכות נמוכה יותר כדי להקל
-        "--output", f"{output_path}/%(title)s.%(ext)s",
         "--no-playlist",
         "--ignore-errors",
         "--no-check-certificates",  # מתעלם מבעיות SSL
-        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",  # User agent של דפדפן
+        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebTools/537.36",
+        "--referer", "https://www.google.com/",  # מראה שהגעת מגוגל
         "--sleep-interval", "1",  # המתנה בין בקשות
         "--max-sleep-interval", "3",
-        url
     ]
+    
+    # הגדרות לפי פורמט
+    if download_format == "audio":
+        cmd.extend([
+            "--extract-audio",
+            "--audio-format", "mp3",
+            "--audio-quality", "192K",  # איכות סבירה
+            "--output", f"{output_path}/%(title)s.%(ext)s",
+            "--format", "bestaudio/best",  # מעדיף audio בלבד
+        ])
+    else:  # video
+        cmd.extend([
+            "--format", "best[height<=480]",  # איכות נמוכה יותר כדי להקל
+            "--output", f"{output_path}/%(title)s.%(ext)s",
+        ])
+    
+    cmd.append(url)
     
     # אם יש קובץ cookies, הוסף אותו
     if os.path.exists(cookies_file):
@@ -78,13 +109,26 @@ def main():
         try:
             alt_cmd = [
                 "yt-dlp",
-                "--format", "worst",  # איכות הכי נמוכה
-                "--output", f"{output_path}/%(id)s.%(ext)s",  # שם פשוט יותר
                 "--no-playlist",
                 "--ignore-errors",
                 "--extractor-args", "youtube:skip=dash",  # דילוג על DASH formats
-                url
             ]
+            
+            if download_format == "audio":
+                alt_cmd.extend([
+                    "--extract-audio",
+                    "--audio-format", "mp3",
+                    "--audio-quality", "128K",  # איכות נמוכה יותר
+                    "--format", "worst",
+                    "--output", f"{output_path}/%(id)s.%(ext)s",
+                ])
+            else:
+                alt_cmd.extend([
+                    "--format", "worst",  # איכות הכי נמוכה
+                    "--output", f"{output_path}/%(id)s.%(ext)s",  # שם פשוט יותר
+                ])
+            
+            alt_cmd.append(url)
             
             alt_result = subprocess.run(alt_cmd, check=True, capture_output=True, text=True, timeout=600)
             print("✅ Alternative method succeeded!")

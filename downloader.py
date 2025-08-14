@@ -1,6 +1,139 @@
 import subprocess
 import os
 import sys
+import time
+import random
+
+def get_random_user_agent():
+    """מחזיר User-Agent אקראי"""
+    user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15"
+    ]
+    return random.choice(user_agents)
+
+def try_with_proxy_rotation(url, download_format, output_path):
+    """ניסיון עם rotated IPs ו-headers"""
+    print("🔄 Trying with IP rotation simulation...")
+    
+    # רשימת headers שונים
+    headers = [
+        ("Accept-Language", "en-US,en;q=0.9"),
+        ("Accept-Language", "he-IL,he;q=0.9,en;q=0.8"),
+        ("Accept-Language", "es-ES,es;q=0.9,en;q=0.8"),
+    ]
+    
+    for i, (lang_header, lang_value) in enumerate(headers):
+        try:
+            print(f"🌐 Attempt {i+1}/3 with different location...")
+            
+            # המתנה אקראית
+            time.sleep(random.uniform(2, 5))
+            
+            cmd = [
+                "yt-dlp",
+                "--user-agent", get_random_user_agent(),
+                "--add-header", f"{lang_header}:{lang_value}",
+                "--add-header", "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "--socket-timeout", "60",
+                "--retries", "3",
+                "--fragment-retries", "3",
+                "--no-check-certificates",
+                "--prefer-insecure",
+                "--geo-bypass",
+                "--geo-bypass-country", ["US", "CA", "GB"][i],  # מדינות שונות
+            ]
+            
+            if download_format == "audio":
+                cmd.extend([
+                    "--extract-audio",
+                    "--audio-format", "mp3", 
+                    "--audio-quality", "128K",
+                    "--format", "bestaudio[abr<=128]/worstaudio",
+                    "--output", f"{output_path}/%(uploader)s-%(title).50s.%(ext)s"
+                ])
+            else:
+                cmd.extend([
+                    "--format", "best[height<=480]/worst",
+                    "--output", f"{output_path}/%(uploader)s-%(title).50s.%(ext)s"
+                ])
+            
+            cmd.append(url)
+            
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=300)
+            print(f"✅ Success with location method {i+1}!")
+            return result
+            
+        except Exception as e:
+            print(f"❌ Location method {i+1} failed: {str(e)[:100]}...")
+            continue
+    
+    return None
+
+def try_alternative_extractors(url, download_format, output_path):
+    """ניסיון עם extractors שונים"""
+    print("🔧 Trying alternative extraction methods...")
+    
+    methods = [
+        # שיטה 1: embedded extractor
+        {
+            "args": ["--extractor-args", "youtube:player_client=web_embedded"],
+            "name": "Web Embedded"
+        },
+        # שיטה 2: mobile client
+        {
+            "args": ["--extractor-args", "youtube:player_client=android"],
+            "name": "Android Client"  
+        },
+        # שיטה 3: TV client
+        {
+            "args": ["--extractor-args", "youtube:player_client=tv_embedded"],
+            "name": "TV Client"
+        }
+    ]
+    
+    for method in methods:
+        try:
+            print(f"🔧 Trying {method['name']}...")
+            time.sleep(random.uniform(1, 3))
+            
+            cmd = [
+                "yt-dlp",
+                "--user-agent", get_random_user_agent(),
+                "--socket-timeout", "45",
+                "--no-check-certificates",
+            ]
+            
+            cmd.extend(method["args"])
+            
+            if download_format == "audio":
+                cmd.extend([
+                    "--extract-audio",
+                    "--audio-format", "mp3",
+                    "--audio-quality", "96K",
+                    "--format", "worstaudio",
+                    "--output", f"{output_path}/%(id)s_%(extractor)s.%(ext)s"
+                ])
+            else:
+                cmd.extend([
+                    "--format", "worst[height<=360]",
+                    "--output", f"{output_path}/%(id)s_%(extractor)s.%(ext)s"
+                ])
+            
+            cmd.append(url)
+            
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=240)
+            print(f"✅ Success with {method['name']}!")
+            return result
+            
+        except Exception as e:
+            print(f"❌ {method['name']} failed: {str(e)[:100]}...")
+            continue
+    
+    return None
 
 def main():
     url_file = "video_url.txt"
@@ -214,18 +347,73 @@ def main():
                     print("✅ Minimal fallback succeeded!")
                     print(minimal_result.stdout)
                     
-                except Exception as final_e:
-                    print("❌ All methods failed!")
-                    print(f"Original error: {e}")
-                    print(f"Alternative 1 error: {alt_e}")  
-                    print(f"Browser method error: {browser_e}")
-                    print(f"Final fallback error: {final_e}")
-                    print("\n💡 Suggestions:")
-                    print("1. Update your cookies (they expire frequently)")
-                    print("2. Try a different video")
-                    print("3. Check if the video is region-locked")
-                    print("4. The video might require login to view")
-                    sys.exit(1)
+        # נסה עם שיטות מתקדמות יותר
+        print("\n🔄 Trying advanced bypass methods...")
+        
+        # שיטה 1: IP rotation simulation
+        result = try_with_proxy_rotation(url, download_format, output_path)
+        if result:
+            print("✅ IP rotation method succeeded!")
+            print(result.stdout)
+            return
+        
+        # שיטה 2: Alternative extractors
+        result = try_alternative_extractors(url, download_format, output_path)
+        if result:
+            print("✅ Alternative extractor succeeded!")
+            print(result.stdout)
+            return
+        
+        # שיטה 3: Last resort - different URL formats
+        print("🎯 Trying different URL formats...")
+        try:
+            # נסה להמיר ל-youtu.be
+            video_id = url.split('v=')[1].split('&')[0] if 'v=' in url else url.split('/')[-1]
+            short_url = f"https://youtu.be/{video_id}"
+            
+            minimal_cmd = [
+                "yt-dlp",
+                "--quiet",  # פחות לוגים
+                "--no-warnings",
+                "--user-agent", get_random_user_agent(),
+                "--socket-timeout", "30",
+                "--extractor-args", "youtube:player_client=web_embedded,web"
+            ]
+            
+            if download_format == "audio":
+                minimal_cmd.extend([
+                    "--extract-audio",
+                    "--audio-format", "mp3", 
+                    "--audio-quality", "64K",
+                    "--format", "worstaudio[abr<=64]",
+                    "--output", f"{output_path}/emergency_%(id)s.%(ext)s"
+                ])
+            else:
+                minimal_cmd.extend([
+                    "--format", "worst[height<=240]",
+                    "--output", f"{output_path}/emergency_%(id)s.%(ext)s"
+                ])
+            
+            minimal_cmd.append(short_url)
+            
+            result = subprocess.run(minimal_cmd, check=True, capture_output=True, text=True, timeout=180)
+            print("✅ Emergency method with short URL succeeded!")
+            print("📝 Downloaded with minimal quality for compatibility")
+            print(result.stdout)
+            
+        except Exception as final_e:
+            print("❌ All advanced methods failed!")
+            print("\n🚫 This video appears to be heavily protected.")
+            print("💡 Final suggestions:")
+            print("1. 🔄 Try again in 10-15 minutes (YouTube may cool down)")
+            print("2. 🎯 Test with a very popular, old video first") 
+            print("3. 🌍 The video might be region-locked")
+            print("4. 🔒 Video might require age verification or login")
+            print("5. 📱 Try a YouTube Short instead of regular video")
+            print(f"\nTechnical details:")
+            print(f"- Original error: {e}")
+            print(f"- Final error: {final_e}")
+            sys.exit(1)
         
     except Exception as e:
         print(f"❌ Unexpected error: {e}")

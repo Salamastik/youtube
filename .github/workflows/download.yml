@@ -9,7 +9,7 @@ on:
         description: 'YouTube URL'
         required: true
         type: string
-        default: 'https://www.youtube.com/watch?v=example'
+        default: ' '
       format:
         description: 'Download format'
         required: true

@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<properties>
+    <!-- Service Loader Configuration -->
+    <service-loader dynamic="true" loadErrorHandler="WARN"/>
+    
+    <!-- Parser Configuration -->
+    <parsers>
+        <!-- Default Parser for most document types -->
+        <parser class="org.apache.tika.parser.DefaultParser">
+            <!-- Exclude default image parsers for VLM-supported formats -->
+            <mime-exclude>image/jpeg</mime-exclude>
+            <mime-exclude>image/png</mime-exclude>
+            <mime-exclude>image/gif</mime-exclude>
+            <mime-exclude>image/bmp</mime-exclude>
+            <mime-exclude>image/webp</mime-exclude>
+            <!-- Keep default parser for other image formats not supported by VLM -->
+        </parser>
+        
+        <!-- Vision Language Model Parser for supported image formats -->
+        <parser class="org.apache.tika.parser.vision.VisionLanguageModelParser">
+            <mime>image/jpeg</mime>
+            <mime>image/jpg</mime>
+            <mime>image/png</mime>
+            <mime>image/gif</mime>
+            <mime>image/bmp</mime>
+            <mime>image/webp</mime>
+            
+            <!-- Parser-specific parameters (optional, can also use env vars) -->
+            <params>
+                <param name="provider" type="string">openai</param>
+                <param name="model" type="string">gpt-4-vision-preview</param>
+                <param name="maxImageSize" type="int">20971520</param>
+                <param name="timeout" type="int">30</param>
+            </params>
+        </parser>
+        
+        <!-- OCR Parser as fallback for images if VLM fails -->
+        <parser class="org.apache.tika.parser.ocr.TesseractOCRParser">
+            <mime>image/tiff</mime>
+            <!-- Add other formats not supported by VLM but needing OCR -->
+        </parser>
+        
+        <!-- PDF Parser with embedded image extraction -->
+        <parser class="org.apache.tika.parser.pdf.PDFParser">
+            <mime>application/pdf</mime>
+            <params>
+                <param name="extractInlineImages" type="bool">true</param>
+                <param name="extractUniqueInlineImagesOnly" type="bool">true</param>
+            </params>
+        </parser>
+        
+        <!-- Microsoft Office parsers with image extraction -->
+        <parser class="org.apache.tika.parser.microsoft.ooxml.OOXMLParser">
+            <mime>application/vnd.openxmlformats-officedocument.wordprocessingml.document</mime>
+            <mime>application/vnd.openxmlformats-officedocument.spreadsheetml.sheet</mime>
+            <mime>application/vnd.openxmlformats-officedocument.presentationml.presentation</mime>
+        </parser>
+    </parsers>
+    
+    <!-- Detector Configuration -->
+    <detectors>
+        <detector class="org.apache.tika.detect.DefaultDetector"/>
+    </detectors>
+    
+    <!-- Metadata Filter Configuration -->
+    <metadataFilters>
+        <metadataFilter class="org.apache.tika.metadata.filter.FieldNameMappingFilter">
+            <params>
+                <param name="vlm_analysis" type="string">X-VLM-Analysis</param>
+                <param name="vlm_provider" type="string">X-VLM-Provider</param>
+                <param name="vlm_model" type="string">X-VLM-Model</param>
+            </params>
+        </metadataFilter>
+    </metadataFilters>
+    
+    <!-- Limits Configuration -->
+    <limits>
+        <!-- Maximum file size for processing (100MB) -->
+        <maxFileSize>104857600</maxFileSize>
+        <!-- Maximum image dimensions -->
+        <maxImageWidth>10000</maxImageWidth>
+        <maxImageHeight>10000</maxImageHeight>
+    </limits>
+    
+    <!-- Executor Service Configuration for async processing -->
+    <async>
+        <maxThreads>5</maxThreads>
+        <queueSize>100</queueSize>
+    </async>
+</properties>

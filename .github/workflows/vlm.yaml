@@ -92,4 +92,4 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: vision-parser-jar
-        path: target/vision-parser-1.0.0-shaded.jar
+        path: target/vision-parser-1.0.0.jar

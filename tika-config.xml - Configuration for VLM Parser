@@ -25,13 +25,7 @@
             <mime>image/bmp</mime>
             <mime>image/webp</mime>
             
-            <!-- Parser-specific parameters (optional, can also use env vars) -->
-            <params>
-                <param name="provider" type="string">openai</param>
-                <param name="model" type="string">gpt-4-vision-preview</param>
-                <param name="maxImageSize" type="int">20971520</param>
-                <param name="timeout" type="int">30</param>
-            </params>
+     
         </parser>
         
         <!-- OCR Parser as fallback for images if VLM fails -->
@@ -62,16 +56,6 @@
         <detector class="org.apache.tika.detect.DefaultDetector"/>
     </detectors>
     
-    <!-- Metadata Filter Configuration -->
-    <metadataFilters>
-        <metadataFilter class="org.apache.tika.metadata.filter.FieldNameMappingFilter">
-            <params>
-                <param name="vlm_analysis" type="string">X-VLM-Analysis</param>
-                <param name="vlm_provider" type="string">X-VLM-Provider</param>
-                <param name="vlm_model" type="string">X-VLM-Model</param>
-            </params>
-        </metadataFilter>
-    </metadataFilters>
     
     <!-- Limits Configuration -->
     <limits>

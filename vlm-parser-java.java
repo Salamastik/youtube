@@ -1,0 +1,373 @@
+package org.apache.tika.parser.vision;
+
+import org.apache.tika.exception.TikaException;
+import org.apache.tika.metadata.Metadata;
+import org.apache.tika.mime.MediaType;
+import org.apache.tika.parser.AbstractParser;
+import org.apache.tika.parser.ParseContext;
+import org.apache.tika.sax.XHTMLContentHandler;
+import org.xml.sax.ContentHandler;
+import org.xml.sax.SAXException;
+
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Duration;
+import java.util.Base64;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Set;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.JsonNode;
+
+/**
+ * Custom Tika Parser that integrates with Vision Language Models
+ * Supports OpenAI GPT-4 Vision, Anthropic Claude, and custom VLM endpoints
+ */
+public class VisionLanguageModelParser extends AbstractParser {
+
+    private static final long serialVersionUID = 1L;
+    
+    // Configuration properties
+    private String apiEndpoint;
+    private String apiKey;
+    private String modelName;
+    private String provider; // "openai", "anthropic", "custom"
+    private int maxImageSize = 20 * 1024 * 1024; // 20MB default
+    private int timeout = 30; // seconds
+    
+    private static final Set<MediaType> SUPPORTED_TYPES = 
+        Collections.unmodifiableSet(new HashSet<MediaType>() {{
+            add(MediaType.image("jpeg"));
+            add(MediaType.image("jpg"));
+            add(MediaType.image("png"));
+            add(MediaType.image("gif"));
+            add(MediaType.image("bmp"));
+            add(MediaType.image("webp"));
+            add(MediaType.image("tiff"));
+        }});
+
+    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final HttpClient httpClient = HttpClient.newBuilder()
+        .connectTimeout(Duration.ofSeconds(10))
+        .build();
+
+    public VisionLanguageModelParser() {
+        // Load configuration from environment variables or system properties
+        this.provider = System.getProperty("tika.vlm.provider", 
+                       System.getenv("TIKA_VLM_PROVIDER") != null ? 
+                       System.getenv("TIKA_VLM_PROVIDER") : "openai");
+        
+        this.apiKey = System.getProperty("tika.vlm.apikey", 
+                     System.getenv("TIKA_VLM_API_KEY"));
+        
+        this.modelName = System.getProperty("tika.vlm.model", 
+                        System.getenv("TIKA_VLM_MODEL") != null ? 
+                        System.getenv("TIKA_VLM_MODEL") : "gpt-4-vision-preview");
+        
+        // Set endpoint based on provider
+        if ("openai".equalsIgnoreCase(provider)) {
+            this.apiEndpoint = System.getProperty("tika.vlm.endpoint", 
+                              "https://api.openai.com/v1/chat/completions");
+        } else if ("anthropic".equalsIgnoreCase(provider)) {
+            this.apiEndpoint = System.getProperty("tika.vlm.endpoint", 
+                              "https://api.anthropic.com/v1/messages");
+        } else {
+            this.apiEndpoint = System.getProperty("tika.vlm.endpoint", 
+                              System.getenv("TIKA_VLM_ENDPOINT"));
+        }
+        
+        String timeoutStr = System.getProperty("tika.vlm.timeout", 
+                           System.getenv("TIKA_VLM_TIMEOUT"));
+        if (timeoutStr != null) {
+            try {
+                this.timeout = Integer.parseInt(timeoutStr);
+            } catch (NumberFormatException e) {
+                // Keep default
+            }
+        }
+    }
+
+    @Override
+    public Set<MediaType> getSupportedTypes(ParseContext context) {
+        return SUPPORTED_TYPES;
+    }
+
+    @Override
+    public void parse(InputStream stream, ContentHandler handler,
+                     Metadata metadata, ParseContext context)
+            throws IOException, SAXException, TikaException {
+        
+        // Check if API is configured
+        if (apiKey == null || apiEndpoint == null) {
+            throw new TikaException("VLM API not configured. Set TIKA_VLM_API_KEY and TIKA_VLM_ENDPOINT");
+        }
+
+        // Read image data
+        byte[] imageData = readInputStream(stream);
+        
+        // Check image size
+        if (imageData.length > maxImageSize) {
+            throw new TikaException("Image size exceeds maximum allowed size of " + maxImageSize + " bytes");
+        }
+
+        // Encode image to base64
+        String base64Image = Base64.getEncoder().encodeToString(imageData);
+        
+        // Get MIME type
+        String mimeType = metadata.get(Metadata.CONTENT_TYPE);
+        if (mimeType == null) {
+            mimeType = "image/jpeg"; // default
+        }
+
+        try {
+            // Call VLM API
+            String analysis = callVisionAPI(base64Image, mimeType);
+            
+            // Parse and output results
+            XHTMLContentHandler xhtml = new XHTMLContentHandler(handler, metadata);
+            xhtml.startDocument();
+            
+            // Add VLM analysis as structured content
+            xhtml.startElement("div", "class", "vlm-analysis");
+            xhtml.startElement("h2");
+            xhtml.characters("Vision Language Model Analysis");
+            xhtml.endElement("h2");
+            
+            // Add the analysis text
+            xhtml.startElement("p");
+            xhtml.characters(analysis);
+            xhtml.endElement("p");
+            
+            // Add metadata
+            metadata.add("vlm_provider", provider);
+            metadata.add("vlm_model", modelName);
+            metadata.add("vlm_analysis", analysis);
+            
+            // Extract and add specific elements if found
+            extractAndAddEntities(analysis, metadata, xhtml);
+            
+            xhtml.endElement("div");
+            xhtml.endDocument();
+            
+        } catch (Exception e) {
+            throw new TikaException("Failed to analyze image with VLM", e);
+        }
+    }
+
+    private byte[] readInputStream(InputStream stream) throws IOException {
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        int nRead;
+        byte[] data = new byte[16384];
+        while ((nRead = stream.read(data, 0, data.length)) != -1) {
+            buffer.write(data, 0, nRead);
+        }
+        return buffer.toByteArray();
+    }
+
+    private String callVisionAPI(String base64Image, String mimeType) throws Exception {
+        HttpRequest request;
+        String requestBody;
+        
+        if ("openai".equalsIgnoreCase(provider)) {
+            requestBody = buildOpenAIRequest(base64Image, mimeType);
+            request = HttpRequest.newBuilder()
+                .uri(URI.create(apiEndpoint))
+                .header("Content-Type", "application/json")
+                .header("Authorization", "Bearer " + apiKey)
+                .timeout(Duration.ofSeconds(timeout))
+                .POST(HttpRequest.BodyPublishers.ofString(requestBody))
+                .build();
+                
+        } else if ("anthropic".equalsIgnoreCase(provider)) {
+            requestBody = buildAnthropicRequest(base64Image, mimeType);
+            request = HttpRequest.newBuilder()
+                .uri(URI.create(apiEndpoint))
+                .header("Content-Type", "application/json")
+                .header("x-api-key", apiKey)
+                .header("anthropic-version", "2023-06-01")
+                .timeout(Duration.ofSeconds(timeout))
+                .POST(HttpRequest.BodyPublishers.ofString(requestBody))
+                .build();
+                
+        } else {
+            // Custom endpoint - use OpenAI format as default
+            requestBody = buildOpenAIRequest(base64Image, mimeType);
+            request = HttpRequest.newBuilder()
+                .uri(URI.create(apiEndpoint))
+                .header("Content-Type", "application/json")
+                .header("Authorization", "Bearer " + apiKey)
+                .timeout(Duration.ofSeconds(timeout))
+                .POST(HttpRequest.BodyPublishers.ofString(requestBody))
+                .build();
+        }
+
+        HttpResponse<String> response = httpClient.send(request, 
+                                                        HttpResponse.BodyHandlers.ofString());
+        
+        if (response.statusCode() != 200) {
+            throw new IOException("VLM API returned status " + response.statusCode() + 
+                                ": " + response.body());
+        }
+
+        return parseAPIResponse(response.body());
+    }
+
+    private String buildOpenAIRequest(String base64Image, String mimeType) 
+            throws Exception {
+        ObjectNode root = objectMapper.createObjectNode();
+        root.put("model", modelName);
+        
+        ArrayNode messages = root.putArray("messages");
+        ObjectNode message = messages.addObject();
+        message.put("role", "user");
+        
+        ArrayNode content = message.putArray("content");
+        
+        // Add text prompt
+        ObjectNode textContent = content.addObject();
+        textContent.put("type", "text");
+        textContent.put("text", "Please analyze this image and provide a detailed description " +
+                               "including: 1) Main subjects and objects, 2) Text content if any, " +
+                               "3) Scene/setting, 4) Colors and composition, 5) Any notable details. " +
+                               "Format the response as structured text.");
+        
+        // Add image
+        ObjectNode imageContent = content.addObject();
+        imageContent.put("type", "image_url");
+        ObjectNode imageUrl = imageContent.putObject("image_url");
+        imageUrl.put("url", "data:" + mimeType + ";base64," + base64Image);
+        
+        root.put("max_tokens", 1000);
+        root.put("temperature", 0.5);
+        
+        return objectMapper.writeValueAsString(root);
+    }
+
+    private String buildAnthropicRequest(String base64Image, String mimeType) 
+            throws Exception {
+        ObjectNode root = objectMapper.createObjectNode();
+        root.put("model", modelName);
+        
+        ArrayNode messages = root.putArray("messages");
+        ObjectNode message = messages.addObject();
+        message.put("role", "user");
+        
+        ArrayNode content = message.putArray("content");
+        
+        // Add image
+        ObjectNode imageContent = content.addObject();
+        imageContent.put("type", "image");
+        ObjectNode source = imageContent.putObject("source");
+        source.put("type", "base64");
+        source.put("media_type", mimeType);
+        source.put("data", base64Image);
+        
+        // Add text prompt
+        ObjectNode textContent = content.addObject();
+        textContent.put("type", "text");
+        textContent.put("text", "Please analyze this image and provide a detailed description " +
+                               "including: 1) Main subjects and objects, 2) Text content if any, " +
+                               "3) Scene/setting, 4) Colors and composition, 5) Any notable details. " +
+                               "Format the response as structured text.");
+        
+        root.put("max_tokens", 1000);
+        
+        return objectMapper.writeValueAsString(root);
+    }
+
+    private String parseAPIResponse(String responseBody) throws Exception {
+        JsonNode root = objectMapper.readTree(responseBody);
+        
+        if ("openai".equalsIgnoreCase(provider)) {
+            JsonNode choices = root.get("choices");
+            if (choices != null && choices.size() > 0) {
+                JsonNode message = choices.get(0).get("message");
+                if (message != null) {
+                    JsonNode content = message.get("content");
+                    if (content != null) {
+                        return content.asText();
+                    }
+                }
+            }
+        } else if ("anthropic".equalsIgnoreCase(provider)) {
+            JsonNode content = root.get("content");
+            if (content != null && content.size() > 0) {
+                JsonNode text = content.get(0).get("text");
+                if (text != null) {
+                    return text.asText();
+                }
+            }
+        } else {
+            // Try OpenAI format first, then Anthropic
+            String result = null;
+            try {
+                JsonNode choices = root.get("choices");
+                if (choices != null && choices.size() > 0) {
+                    result = choices.get(0).get("message").get("content").asText();
+                }
+            } catch (Exception e) {
+                // Try Anthropic format
+                JsonNode content = root.get("content");
+                if (content != null && content.size() > 0) {
+                    result = content.get(0).get("text").asText();
+                }
+            }
+            if (result != null) return result;
+        }
+        
+        throw new IOException("Unable to parse VLM API response");
+    }
+
+    private void extractAndAddEntities(String analysis, Metadata metadata, 
+                                      XHTMLContentHandler xhtml) 
+            throws SAXException {
+        // Extract potential text found in image
+        if (analysis.toLowerCase().contains("text:") || 
+            analysis.toLowerCase().contains("writing:")) {
+            metadata.add("extracted_text_from_vision", "true");
+        }
+        
+        // Extract object detection results
+        if (analysis.toLowerCase().contains("object") || 
+            analysis.toLowerCase().contains("person") ||
+            analysis.toLowerCase().contains("animal")) {
+            metadata.add("objects_detected", "true");
+        }
+        
+        // Add structured sections if identifiable
+        String[] lines = analysis.split("\n");
+        boolean inList = false;
+        
+        for (String line : lines) {
+            line = line.trim();
+            if (line.isEmpty()) continue;
+            
+            if (line.matches("^\\d+[)\\.].*") || line.startsWith("-") || line.startsWith("*")) {
+                if (!inList) {
+                    xhtml.startElement("ul");
+                    inList = true;
+                }
+                xhtml.startElement("li");
+                xhtml.characters(line.replaceFirst("^[\\d)\\.*-]+\\s*", ""));
+                xhtml.endElement("li");
+            } else {
+                if (inList) {
+                    xhtml.endElement("ul");
+                    inList = false;
+                }
+            }
+        }
+        
+        if (inList) {
+            xhtml.endElement("ul");
+        }
+    }
+}

@@ -1,0 +1,174 @@
+# Multi-stage build for custom Tika with VLM support
+FROM maven:3.8-openjdk-11 AS builder
+
+# Set working directory
+WORKDIR /build
+
+# Create Maven project structure
+RUN mkdir -p src/main/java/org/apache/tika/parser/vision
+RUN mkdir -p src/main/resources/META-INF/services
+
+# Create pom.xml for the custom parser
+COPY <<EOF pom.xml
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 
+         http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    
+    <groupId>org.apache.tika</groupId>
+    <artifactId>tika-vlm-parser</artifactId>
+    <version>1.0.0</version>
+    <packaging>jar</packaging>
+    
+    <properties>
+        <maven.compiler.source>11</maven.compiler.source>
+        <maven.compiler.target>11</maven.compiler.target>
+        <tika.version>2.9.1</tika.version>
+        <jackson.version>2.15.2</jackson.version>
+    </properties>
+    
+    <dependencies>
+        <dependency>
+            <groupId>org.apache.tika</groupId>
+            <artifactId>tika-core</artifactId>
+            <version>\${tika.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.tika</groupId>
+            <artifactId>tika-parsers-standard-package</artifactId>
+            <version>\${tika.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>\${jackson.version}</version>
+        </dependency>
+    </dependencies>
+    
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.11.0</version>
+                <configuration>
+                    <source>11</source>
+                    <target>11</target>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.5.0</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <filters>
+                                <filter>
+                                    <artifact>*:*</artifact>
+                                    <excludes>
+                                        <exclude>META-INF/*.SF</exclude>
+                                        <exclude>META-INF/*.DSA</exclude>
+                                        <exclude>META-INF/*.RSA</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+EOF
+
+# Copy the VisionLanguageModelParser.java
+COPY VisionLanguageModelParser.java src/main/java/org/apache/tika/parser/vision/
+
+# Create service provider configuration
+RUN echo "org.apache.tika.parser.vision.VisionLanguageModelParser" > \
+    src/main/resources/META-INF/services/org.apache.tika.parser.Parser
+
+# Build the custom parser JAR
+RUN mvn clean package
+
+# Main stage - extend official Tika Docker image
+FROM apache/tika:3.2.2
+
+# Switch to root to install dependencies
+USER root
+
+# Copy custom parser JAR to Tika lib directory
+COPY --from=builder /build/target/tika-vlm-parser-1.0.0.jar /opt/tika/lib/
+
+# Copy custom configuration
+COPY tika-config.xml /opt/tika/config/tika-config.xml
+
+# Create startup script with environment variable support
+RUN cat <<'EOF' > /opt/tika/start-tika.sh
+#!/bin/bash
+
+# Set default values if not provided
+export TIKA_VLM_PROVIDER=${TIKA_VLM_PROVIDER:-openai}
+export TIKA_VLM_MODEL=${TIKA_VLM_MODEL:-gpt-4-vision-preview}
+export TIKA_VLM_TIMEOUT=${TIKA_VLM_TIMEOUT:-30}
+
+# Check if API key is set
+if [ -z "$TIKA_VLM_API_KEY" ]; then
+    echo "Warning: TIKA_VLM_API_KEY is not set. VLM parser will be disabled."
+fi
+
+# Set endpoint based on provider if not explicitly set
+if [ -z "$TIKA_VLM_ENDPOINT" ]; then
+    case "$TIKA_VLM_PROVIDER" in
+        openai)
+            export TIKA_VLM_ENDPOINT="https://api.openai.com/v1/chat/completions"
+            ;;
+        anthropic)
+            export TIKA_VLM_ENDPOINT="https://api.anthropic.com/v1/messages"
+            ;;
+        *)
+            echo "Warning: TIKA_VLM_ENDPOINT not set for custom provider"
+            ;;
+    esac
+fi
+
+# Start Tika server with custom config
+exec java \
+    -Xms1g \
+    -Xmx2g \
+    -Dtika.config=/opt/tika/config/tika-config.xml \
+    -Djava.awt.headless=true \
+    -Dfile.encoding=UTF-8 \
+    -jar /opt/tika/tika-server.jar \
+    -h 0.0.0.0 \
+    -p 9998 \
+    "$@"
+EOF
+
+RUN chmod +x /opt/tika/start-tika.sh
+
+# Switch back to tika user
+USER tika
+
+# Set working directory
+WORKDIR /opt/tika
+
+# Expose Tika server port
+EXPOSE 9998
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:9998/tika || exit 1
+
+# Set entrypoint
+ENTRYPOINT ["/opt/tika/start-tika.sh"]

@@ -200,3 +200,7 @@ Pull requests מתקבלים בברכה! 🎉
 Made with ❤️ for the community
 
 </div>
+
+
+
+ENTRYPOINT [ "/bin/sh", "-c", "exec java -cp \"/tika-server-standard-${TIKA_VERSION}.jar:/tika-extras/*\" org.apache.tika.server.core.TikaServerCli -h 0.0.0.0 $0 $@"]

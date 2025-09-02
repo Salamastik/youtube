@@ -1,5 +1,13 @@
 package org.apache.tika.parser.vision;
 
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
+import java.net.ProxySelector;
+import java.net.InetSocketAddress;
+import java.security.cert.X509Certificate;
+import java.security.SecureRandom;
+
 import org.apache.tika.exception.TikaException;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.mime.MediaType;
@@ -53,11 +61,8 @@ public class VisionLanguageModelParser extends AbstractParser {
             add(MediaType.image("webp"));
             add(MediaType.image("tiff"));
         }});
-
     private final ObjectMapper objectMapper = new ObjectMapper();
-    private final HttpClient httpClient = HttpClient.newBuilder()
-        .connectTimeout(Duration.ofSeconds(10))
-        .build();
+    private final HttpClient httpClient ;
 
     public VisionLanguageModelParser() {
         // Load configuration from environment variables or system properties
@@ -93,8 +98,38 @@ public class VisionLanguageModelParser extends AbstractParser {
                 // Keep default
             }
         }
+        this.httpClient = createHttpClient();
     }
-
+private HttpClient createHttpClient() {
+        try {
+            HttpClient.Builder builder = HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(10))
+                .version(HttpClient.Version.HTTP_2);
+            
+            // Check for proxy settings
+            String proxyHost = System.getProperty("https.proxyHost");
+            String proxyPort = System.getProperty("https.proxyPort");
+            if (proxyHost != null && proxyPort != null) {
+                builder.proxy(ProxySelector.of(
+                    new InetSocketAddress(proxyHost, Integer.parseInt(proxyPort))
+                ));
+            }
+            
+            // Configure SSL Context for better compatibility
+            SSLContext sslContext = SSLContext.getInstance("TLS");
+            sslContext.init(null, null, new SecureRandom());
+            builder.sslContext(sslContext);
+            
+            return builder.build();
+            
+        } catch (Exception e) {
+            // Fallback to basic client if SSL configuration fails
+            System.err.println("Warning: Failed to configure SSL context: " + e.getMessage());
+            return HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(10))
+                .build();
+        }
+    }
     @Override
     public Set<MediaType> getSupportedTypes(ParseContext context) {
         return SUPPORTED_TYPES;
@@ -172,54 +207,68 @@ public class VisionLanguageModelParser extends AbstractParser {
         return buffer.toByteArray();
     }
 
-    private String callVisionAPI(String base64Image, String mimeType) throws Exception {
+      private String callVisionAPI(String base64Image, String mimeType) throws Exception {
         HttpRequest request;
         String requestBody;
         
-        if ("openai".equalsIgnoreCase(provider)) {
-            requestBody = buildOpenAIRequest(base64Image, mimeType);
-            request = HttpRequest.newBuilder()
-                .uri(URI.create(apiEndpoint))
-                .header("Content-Type", "application/json")
-                .header("Authorization", "Bearer " + apiKey)
-                .timeout(Duration.ofSeconds(timeout))
-                .POST(HttpRequest.BodyPublishers.ofString(requestBody))
-                .build();
-                
-        } else if ("anthropic".equalsIgnoreCase(provider)) {
-            requestBody = buildAnthropicRequest(base64Image, mimeType);
-            request = HttpRequest.newBuilder()
-                .uri(URI.create(apiEndpoint))
-                .header("Content-Type", "application/json")
-                .header("x-api-key", apiKey)
-                .header("anthropic-version", "2023-06-01")
-                .timeout(Duration.ofSeconds(timeout))
-                .POST(HttpRequest.BodyPublishers.ofString(requestBody))
-                .build();
-                
-        } else {
-            // Custom endpoint - use OpenAI format as default
-            requestBody = buildOpenAIRequest(base64Image, mimeType);
-            request = HttpRequest.newBuilder()
-                .uri(URI.create(apiEndpoint))
-                .header("Content-Type", "application/json")
-                .header("Authorization", "Bearer " + apiKey)
-                .timeout(Duration.ofSeconds(timeout))
-                .POST(HttpRequest.BodyPublishers.ofString(requestBody))
-                .build();
+        try {
+            if ("openai".equalsIgnoreCase(provider)) {
+                requestBody = buildOpenAIRequest(base64Image, mimeType);
+                request = HttpRequest.newBuilder()
+                    .uri(URI.create(apiEndpoint))
+                    .header("Content-Type", "application/json")
+                    .header("Authorization", "Bearer " + apiKey)
+                    .timeout(Duration.ofSeconds(timeout))
+                    .POST(HttpRequest.BodyPublishers.ofString(requestBody))
+                    .build();
+                    
+            } else if ("anthropic".equalsIgnoreCase(provider)) {
+                requestBody = buildAnthropicRequest(base64Image, mimeType);
+                request = HttpRequest.newBuilder()
+                    .uri(URI.create(apiEndpoint))
+                    .header("Content-Type", "application/json")
+                    .header("x-api-key", apiKey)
+                    .header("anthropic-version", "2023-06-01")
+                    .timeout(Duration.ofSeconds(timeout))
+                    .POST(HttpRequest.BodyPublishers.ofString(requestBody))
+                    .build();
+                    
+            } else {
+                requestBody = buildOpenAIRequest(base64Image, mimeType);
+                request = HttpRequest.newBuilder()
+                    .uri(URI.create(apiEndpoint))
+                    .header("Content-Type", "application/json")
+                    .header("Authorization", "Bearer " + apiKey)
+                    .timeout(Duration.ofSeconds(timeout))
+                    .POST(HttpRequest.BodyPublishers.ofString(requestBody))
+                    .build();
+            }
+    
+            HttpResponse<String> response = httpClient.send(request, 
+                                                            HttpResponse.BodyHandlers.ofString());
+            
+            if (response.statusCode() != 200) {
+                throw new IOException("VLM API returned status " + response.statusCode() + 
+                                    ": " + response.body());
+            }
+    
+            return parseAPIResponse(response.body());
+            
+        } catch (javax.net.ssl.SSLHandshakeException e) {
+            // Provide more specific error message for SSL issues
+            String errorMsg = "SSL Handshake failed when connecting to " + apiEndpoint + ". ";
+            errorMsg += "Possible causes: \n";
+            errorMsg += "1. Behind a corporate proxy (set -Dhttps.proxyHost and -Dhttps.proxyPort)\n";
+            errorMsg += "2. Outdated Java version (requires Java 11+)\n";
+            errorMsg += "3. Missing CA certificates in trust store\n";
+            errorMsg += "4. Network firewall blocking HTTPS traffic\n";
+            errorMsg += "Original error: " + e.getMessage();
+            throw new TikaException(errorMsg, e);
+            
+        } catch (Exception e) {
+            throw new TikaException("Failed to call VLM API: " + e.getMessage(), e);
         }
-
-        HttpResponse<String> response = httpClient.send(request, 
-                                                        HttpResponse.BodyHandlers.ofString());
-        
-        if (response.statusCode() != 200) {
-            throw new IOException("VLM API returned status " + response.statusCode() + 
-                                ": " + response.body());
-        }
-
-        return parseAPIResponse(response.body());
     }
-
     private String buildOpenAIRequest(String base64Image, String mimeType) 
             throws Exception {
         ObjectNode root = objectMapper.createObjectNode();
@@ -371,3 +420,31 @@ public class VisionLanguageModelParser extends AbstractParser {
         }
     }
 }
+
+
+class UnsafeHttpClient {
+    public static HttpClient createUnsafeClient() {
+        try {
+            // Create a trust manager that accepts all certificates
+            TrustManager[] trustAllCerts = new TrustManager[] {
+                new X509TrustManager() {
+                    public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
+                    public void checkClientTrusted(X509Certificate[] certs, String authType) {}
+                    public void checkServerTrusted(X509Certificate[] certs, String authType) {}
+                }
+            };
+            
+            SSLContext sslContext = SSLContext.getInstance("TLS");
+            sslContext.init(null, trustAllCerts, new SecureRandom());
+            
+            return HttpClient.newBuilder()
+                .sslContext(sslContext)
+                .connectTimeout(Duration.ofSeconds(10))
+                .build();
+                
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to create unsafe HTTP client", e);
+        }
+    }
+}
+

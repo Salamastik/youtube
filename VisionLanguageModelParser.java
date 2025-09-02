@@ -62,7 +62,8 @@ public class VisionLanguageModelParser extends AbstractParser {
             add(MediaType.image("tiff"));
         }});
     private final ObjectMapper objectMapper = new ObjectMapper();
-    private final HttpClient httpClient ;
+    private HttpClient httpClient;
+    private HttpClient unsafeHttpClient;
 
     public VisionLanguageModelParser() {
         // Load configuration from environment variables or system properties
@@ -100,7 +101,8 @@ public class VisionLanguageModelParser extends AbstractParser {
         }
         this.httpClient = createHttpClient();
     }
-private HttpClient createHttpClient() {
+
+    private HttpClient createHttpClient() {
         try {
             HttpClient.Builder builder = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
@@ -130,6 +132,14 @@ private HttpClient createHttpClient() {
                 .build();
         }
     }
+
+    private HttpClient getUnsafeHttpClient() {
+        if (unsafeHttpClient == null) {
+            unsafeHttpClient = UnsafeHttpClient.createUnsafeClient();
+        }
+        return unsafeHttpClient;
+    }
+
     @Override
     public Set<MediaType> getSupportedTypes(ParseContext context) {
         return SUPPORTED_TYPES;
@@ -207,7 +217,7 @@ private HttpClient createHttpClient() {
         return buffer.toByteArray();
     }
 
-      private String callVisionAPI(String base64Image, String mimeType) throws Exception {
+    private String callVisionAPI(String base64Image, String mimeType) throws Exception {
         HttpRequest request;
         String requestBody;
         
@@ -243,9 +253,39 @@ private HttpClient createHttpClient() {
                     .POST(HttpRequest.BodyPublishers.ofString(requestBody))
                     .build();
             }
-    
-            HttpResponse<String> response = httpClient.send(request, 
-                                                            HttpResponse.BodyHandlers.ofString());
+
+            // Try with regular HTTP client first
+            HttpResponse<String> response;
+            try {
+                response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+                System.out.println("Successfully connected with secure HTTP client");
+            } catch (Exception e) {
+                // Log the original error
+                System.err.println("Secure HTTP client failed: " + e.getMessage());
+                System.err.println("Falling back to unsafe HTTP client...");
+                
+                // Try with unsafe HTTP client
+                try {
+                    response = getUnsafeHttpClient().send(request, HttpResponse.BodyHandlers.ofString());
+                    System.out.println("Successfully connected with unsafe HTTP client");
+                } catch (Exception unsafeException) {
+                    // If both fail, provide detailed error message
+                    String errorMsg = "Both secure and unsafe HTTP clients failed:\n";
+                    errorMsg += "Secure client error: " + e.getMessage() + "\n";
+                    errorMsg += "Unsafe client error: " + unsafeException.getMessage() + "\n";
+                    
+                    if (e instanceof javax.net.ssl.SSLHandshakeException) {
+                        errorMsg += "\nSSL Handshake failed when connecting to " + apiEndpoint + ". ";
+                        errorMsg += "Possible causes: \n";
+                        errorMsg += "1. Behind a corporate proxy (set -Dhttps.proxyHost and -Dhttps.proxyPort)\n";
+                        errorMsg += "2. Outdated Java version (requires Java 11+)\n";
+                        errorMsg += "3. Missing CA certificates in trust store\n";
+                        errorMsg += "4. Network firewall blocking HTTPS traffic\n";
+                    }
+                    
+                    throw new TikaException(errorMsg, e);
+                }
+            }
             
             if (response.statusCode() != 200) {
                 throw new IOException("VLM API returned status " + response.statusCode() + 
@@ -254,21 +294,14 @@ private HttpClient createHttpClient() {
     
             return parseAPIResponse(response.body());
             
-        } catch (javax.net.ssl.SSLHandshakeException e) {
-            // Provide more specific error message for SSL issues
-            String errorMsg = "SSL Handshake failed when connecting to " + apiEndpoint + ". ";
-            errorMsg += "Possible causes: \n";
-            errorMsg += "1. Behind a corporate proxy (set -Dhttps.proxyHost and -Dhttps.proxyPort)\n";
-            errorMsg += "2. Outdated Java version (requires Java 11+)\n";
-            errorMsg += "3. Missing CA certificates in trust store\n";
-            errorMsg += "4. Network firewall blocking HTTPS traffic\n";
-            errorMsg += "Original error: " + e.getMessage();
-            throw new TikaException(errorMsg, e);
-            
+        } catch (TikaException e) {
+            // Re-throw TikaExceptions as-is
+            throw e;
         } catch (Exception e) {
             throw new TikaException("Failed to call VLM API: " + e.getMessage(), e);
         }
     }
+
     private String buildOpenAIRequest(String base64Image, String mimeType) 
             throws Exception {
         ObjectNode root = objectMapper.createObjectNode();
@@ -421,7 +454,6 @@ private HttpClient createHttpClient() {
     }
 }
 
-
 class UnsafeHttpClient {
     public static HttpClient createUnsafeClient() {
         try {
@@ -447,4 +479,3 @@ class UnsafeHttpClient {
         }
     }
 }
-

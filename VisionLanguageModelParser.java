@@ -48,8 +48,15 @@ public class VisionLanguageModelParser extends AbstractParser {
     private String apiKey;
     private String modelName;
     private String provider; // "openai", "anthropic", "custom"
+    private String prompt; // Configurable prompt
     private int maxImageSize = 20 * 1024 * 1024; // 20MB default
     private int timeout = 30; // seconds
+    
+    // Default prompt if none specified
+    private static final String DEFAULT_PROMPT = "Please analyze this image and provide a detailed description " +
+                                               "including: 1) Main subjects and objects, 2) Text content if any, " +
+                                               "3) Scene/setting, 4) Colors and composition, 5) Any notable details. " +
+                                               "Format the response as structured text.";
     
     private static final Set<MediaType> SUPPORTED_TYPES = 
         Collections.unmodifiableSet(new HashSet<MediaType>() {{
@@ -77,6 +84,11 @@ public class VisionLanguageModelParser extends AbstractParser {
         this.modelName = System.getProperty("tika.vlm.model", 
                         System.getenv("TIKA_VLM_MODEL") != null ? 
                         System.getenv("TIKA_VLM_MODEL") : "gpt-4-vision-preview");
+        
+        // Load prompt from environment variable or system property
+        this.prompt = System.getProperty("tika.vlm.prompt", 
+                     System.getenv("TIKA_VLM_PROMPT") != null ? 
+                     System.getenv("TIKA_VLM_PROMPT") : DEFAULT_PROMPT);
         
         // Set endpoint based on provider
         if ("openai".equalsIgnoreCase(provider)) {
@@ -194,6 +206,7 @@ public class VisionLanguageModelParser extends AbstractParser {
             // Add metadata
             metadata.add("vlm_provider", provider);
             metadata.add("vlm_model", modelName);
+            metadata.add("vlm_prompt", prompt);
             metadata.add("vlm_analysis", analysis);
             
             // Extract and add specific elements if found
@@ -313,13 +326,10 @@ public class VisionLanguageModelParser extends AbstractParser {
         
         ArrayNode content = message.putArray("content");
         
-        // Add text prompt
+        // Add text prompt (now configurable)
         ObjectNode textContent = content.addObject();
         textContent.put("type", "text");
-        textContent.put("text", "Please analyze this image and provide a detailed description " +
-                               "including: 1) Main subjects and objects, 2) Text content if any, " +
-                               "3) Scene/setting, 4) Colors and composition, 5) Any notable details. " +
-                               "Format the response as structured text.");
+        textContent.put("text", prompt);
         
         // Add image
         ObjectNode imageContent = content.addObject();
@@ -352,13 +362,10 @@ public class VisionLanguageModelParser extends AbstractParser {
         source.put("media_type", mimeType);
         source.put("data", base64Image);
         
-        // Add text prompt
+        // Add text prompt (now configurable)
         ObjectNode textContent = content.addObject();
         textContent.put("type", "text");
-        textContent.put("text", "Please analyze this image and provide a detailed description " +
-                               "including: 1) Main subjects and objects, 2) Text content if any, " +
-                               "3) Scene/setting, 4) Colors and composition, 5) Any notable details. " +
-                               "Format the response as structured text.");
+        textContent.put("text", prompt);
         
         root.put("max_tokens", 1000);
         
@@ -452,6 +459,8 @@ public class VisionLanguageModelParser extends AbstractParser {
             xhtml.endElement("ul");
         }
     }
+
+  
 }
 
 class UnsafeHttpClient {

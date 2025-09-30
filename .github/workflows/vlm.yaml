@@ -1,4 +1,4 @@
-name: Build VisionLanguageModelParser JAR
+name: Build AsyncVisionLanguageModelParser JAR
 
 on:
   push:
@@ -31,7 +31,7 @@ jobs:
     - name: Set up Maven project
       run: |
         mkdir -p src/main/java/org/apache/tika/parser/vision
-        mv VisionLanguageModelParser.java src/main/java/org/apache/tika/parser/vision/
+        mv AsyncVisionLanguageModelParser.java src/main/java/org/apache/tika/parser/vision/
         # Create minimal pom.xml if it does not exist
         if [ ! -f pom.xml ]; then
           cat <<EOF > pom.xml

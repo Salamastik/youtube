@@ -3,10 +3,14 @@ package org.apache.tika.parser.vision;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
+import javax.net.ssl.TrustManagerFactory;
 import java.net.ProxySelector;
 import java.net.InetSocketAddress;
 import java.security.cert.X509Certificate;
+import java.security.cert.CertificateFactory;
+import java.security.KeyStore;
 import java.security.SecureRandom;
+import java.io.ByteArrayInputStream;
 
 import org.apache.tika.exception.TikaException;
 import org.apache.tika.metadata.Metadata;
@@ -16,6 +20,9 @@ import org.apache.tika.parser.ParseContext;
 import org.apache.tika.sax.XHTMLContentHandler;
 import org.xml.sax.ContentHandler;
 import org.xml.sax.SAXException;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -29,16 +36,6 @@ import java.util.Base64;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
-import java.util.List;
-import java.util.ArrayList;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -46,31 +43,24 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.JsonNode;
 
 /**
- * Async Vision Language Model Parser that integrates with VLMs
- * Supports batch processing and concurrent API calls
+ * Custom Tika Parser that integrates with Vision Language Models
+ * Supports OpenAI GPT-4 Vision, Anthropic Claude, and custom VLM endpoints
  */
-public class AsyncVisionLanguageModelParser extends AbstractParser {
+public class VisionLanguageModelParser extends AbstractParser {
 
     private static final long serialVersionUID = 1L;
+    private static final Logger LOGGER = LoggerFactory.getLogger(VisionLanguageModelParser.class);
     
     // Configuration properties
     private String apiEndpoint;
     private String apiKey;
     private String modelName;
-    private String provider; // "openai", "anthropic", "custom"
+    private String provider;
     private String prompt;
-    private int maxImageSize = 20 * 1024 * 1024; // 20MB default
-    private int timeout = 30; // seconds
-    private int maxConcurrentRequests = 5; // Max concurrent API calls
-    private int retryAttempts = 3; // Number of retry attempts
-    private long retryDelayMs = 1000; // Delay between retries
+    private int maxImageSize = 20 * 1024 * 1024;
+    private int timeout = 30;
+    private String customCertificate; // הסרטיפיקט כמחרוזת
     
-    // Thread pool for async operations
-    private final ExecutorService executorService;
-    private final AtomicInteger activeRequests = new AtomicInteger(0);
-    private final ConcurrentHashMap<String, CompletableFuture<String>> requestCache = new ConcurrentHashMap<>();
-    
-    // Default prompt if none specified
     private static final String DEFAULT_PROMPT = "Please analyze this image and provide a detailed description " +
                                                "including: 1) Main subjects and objects, 2) Text content if any, " +
                                                "3) Scene/setting, 4) Colors and composition, 5) Any notable details. " +
@@ -86,19 +76,11 @@ public class AsyncVisionLanguageModelParser extends AbstractParser {
             add(MediaType.image("webp"));
             add(MediaType.image("tiff"));
         }});
-        
     private final ObjectMapper objectMapper = new ObjectMapper();
     private HttpClient httpClient;
     private HttpClient unsafeHttpClient;
 
-    public AsyncVisionLanguageModelParser() {
-        this(Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors()));
-    }
-
-    public AsyncVisionLanguageModelParser(ExecutorService executorService) {
-        this.executorService = executorService;
-        
-        // Load configuration from environment variables or system properties
+    public VisionLanguageModelParser() {
         this.provider = System.getProperty("tika.vlm.provider", 
                        System.getenv("TIKA_VLM_PROVIDER") != null ? 
                        System.getenv("TIKA_VLM_PROVIDER") : "openai");
@@ -114,7 +96,10 @@ public class AsyncVisionLanguageModelParser extends AbstractParser {
                      System.getenv("TIKA_VLM_PROMPT") != null ? 
                      System.getenv("TIKA_VLM_PROMPT") : DEFAULT_PROMPT);
         
-        // Set endpoint based on provider
+        // טעינת הסרטיפיקט ממשתנה סביבה או system property
+        this.customCertificate = System.getProperty("tika.vlm.certificate",
+                                System.getenv("TIKA_VLM_CERTIFICATE"));
+        
         if ("openai".equalsIgnoreCase(provider)) {
             this.apiEndpoint = System.getProperty("tika.vlm.endpoint", 
                               "https://api.openai.com/v1/chat/completions");
@@ -135,17 +120,6 @@ public class AsyncVisionLanguageModelParser extends AbstractParser {
                 // Keep default
             }
         }
-        
-        String maxConcurrentStr = System.getProperty("tika.vlm.maxConcurrent", 
-                                  System.getenv("TIKA_VLM_MAX_CONCURRENT"));
-        if (maxConcurrentStr != null) {
-            try {
-                this.maxConcurrentRequests = Integer.parseInt(maxConcurrentStr);
-            } catch (NumberFormatException e) {
-                // Keep default
-            }
-        }
-        
         this.httpClient = createHttpClient();
     }
 
@@ -153,10 +127,8 @@ public class AsyncVisionLanguageModelParser extends AbstractParser {
         try {
             HttpClient.Builder builder = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
-                .version(HttpClient.Version.HTTP_2)
-                .executor(executorService); // Use our executor service
+                .version(HttpClient.Version.HTTP_2);
             
-            // Check for proxy settings
             String proxyHost = System.getProperty("https.proxyHost");
             String proxyPort = System.getProperty("https.proxyPort");
             if (proxyHost != null && proxyPort != null) {
@@ -165,25 +137,75 @@ public class AsyncVisionLanguageModelParser extends AbstractParser {
                 ));
             }
             
-            // Configure SSL Context for better compatibility
-            SSLContext sslContext = SSLContext.getInstance("TLS");
-            sslContext.init(null, null, new SecureRandom());
-            builder.sslContext(sslContext);
+            // אם יש סרטיפיקט מותאם אישית, טען אותו
+            if (customCertificate != null && !customCertificate.trim().isEmpty()) {
+                SSLContext sslContext = createSSLContextWithCustomCert(customCertificate);
+                builder.sslContext(sslContext);
+                LOGGER.info("Loaded custom certificate from configuration");
+            } else {
+                // Configure SSL Context for better compatibility
+                SSLContext sslContext = SSLContext.getInstance("TLS");
+                sslContext.init(null, null, new SecureRandom());
+                builder.sslContext(sslContext);
+            }
             
             return builder.build();
             
         } catch (Exception e) {
-            System.err.println("Warning: Failed to configure SSL context: " + e.getMessage());
+            LOGGER.warn("Failed to configure SSL context: {}", e.getMessage(), e);
             return HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
-                .executor(executorService)
                 .build();
         }
     }
 
+    /**
+     * יוצר SSLContext עם סרטיפיקט מותאם אישית מתוך מחרוזת
+     * 
+     * @param certContent תוכן הסרטיפיקט (PEM format)
+     * @return SSLContext מוגדר
+     */
+    private SSLContext createSSLContextWithCustomCert(String certContent) throws Exception {
+        // הסר רווחים מיותרים ותקן את הפורמט
+        certContent = certContent.trim();
+        
+        // אם הסרטיפיקט לא מתחיל ב-BEGIN CERTIFICATE, הוסף את זה
+        if (!certContent.startsWith("-----BEGIN CERTIFICATE-----")) {
+            certContent = "-----BEGIN CERTIFICATE-----\n" + 
+                         certContent + 
+                         "\n-----END CERTIFICATE-----";
+        }
+        
+        // המרת הסרטיפיקט למחרוזת bytes
+        byte[] certBytes = certContent.getBytes("UTF-8");
+        
+        // יצירת CertificateFactory
+        CertificateFactory cf = CertificateFactory.getInstance("X.509");
+        X509Certificate cert = (X509Certificate) cf.generateCertificate(
+            new ByteArrayInputStream(certBytes)
+        );
+        
+        // יצירת KeyStore והוספת הסרטיפיקט
+        KeyStore keyStore = KeyStore.getInstance(KeyStore.getDefaultType());
+        keyStore.load(null, null);
+        keyStore.setCertificateEntry("custom-cert", cert);
+        
+        // יצירת TrustManager עם ה-KeyStore
+        TrustManagerFactory tmf = TrustManagerFactory.getInstance(
+            TrustManagerFactory.getDefaultAlgorithm()
+        );
+        tmf.init(keyStore);
+        
+        // יצירת SSLContext
+        SSLContext sslContext = SSLContext.getInstance("TLS");
+        sslContext.init(null, tmf.getTrustManagers(), new SecureRandom());
+        
+        return sslContext;
+    }
+
     private HttpClient getUnsafeHttpClient() {
         if (unsafeHttpClient == null) {
-            unsafeHttpClient = UnsafeHttpClient.createUnsafeClient(executorService);
+            unsafeHttpClient = UnsafeHttpClient.createUnsafeClient();
         }
         return unsafeHttpClient;
     }
@@ -198,116 +220,68 @@ public class AsyncVisionLanguageModelParser extends AbstractParser {
                      Metadata metadata, ParseContext context)
             throws IOException, SAXException, TikaException {
         
-        // Check if API is configured
         if (apiKey == null || apiEndpoint == null) {
             throw new TikaException("VLM API not configured. Set TIKA_VLM_API_KEY and TIKA_VLM_ENDPOINT");
         }
 
-        // Read image data
         byte[] imageData = readInputStream(stream);
         
-        // Check image size
         if (imageData.length > maxImageSize) {
             throw new TikaException("Image size exceeds maximum allowed size of " + maxImageSize + " bytes");
         }
 
-        // Process asynchronously and wait for result
+        String base64Image = Base64.getEncoder().encodeToString(imageData);
+        
+        String mimeType = metadata.get(Metadata.CONTENT_TYPE);
+        if (mimeType == null) {
+            mimeType = "image/jpeg";
+        }
+
         try {
-            CompletableFuture<String> analysisFuture = analyzeImageAsync(imageData, metadata);
+            String analysis = callVisionAPI(base64Image, mimeType);
             
-            // Wait for the result with timeout
-            String analysis = analysisFuture.get(timeout, TimeUnit.SECONDS);
+            XHTMLContentHandler xhtml = new XHTMLContentHandler(handler, metadata);
+            xhtml.startDocument();
             
-            // Parse and output results
-            writeOutput(handler, metadata, analysis);
+            xhtml.startElement("div", "class", "vlm-analysis");
+            xhtml.startElement("h2");
+            xhtml.characters("Vision Language Model Analysis");
+            xhtml.endElement("h2");
             
-        } catch (TimeoutException e) {
-            throw new TikaException("VLM API call timed out after " + timeout + " seconds", e);
+            xhtml.startElement("p");
+            xhtml.characters(analysis);
+            xhtml.endElement("p");
+            
+            metadata.add("vlm_provider", provider);
+            metadata.add("vlm_model", modelName);
+            metadata.add("vlm_prompt", prompt);
+            metadata.add("vlm_analysis", analysis);
+            
+            extractAndAddEntities(analysis, metadata, xhtml);
+            
+            xhtml.endElement("div");
+            xhtml.endDocument();
+            
         } catch (Exception e) {
             throw new TikaException("Failed to analyze image with VLM", e);
         }
     }
 
-    /**
-     * Asynchronously analyze an image
-     */
-    public CompletableFuture<String> analyzeImageAsync(byte[] imageData, Metadata metadata) {
-        String base64Image = Base64.getEncoder().encodeToString(imageData);
-        String mimeType = metadata.get(Metadata.CONTENT_TYPE);
-        if (mimeType == null) {
-            mimeType = "image/jpeg";
+    private byte[] readInputStream(InputStream stream) throws IOException {
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        int nRead;
+        byte[] data = new byte[16384];
+        while ((nRead = stream.read(data, 0, data.length)) != -1) {
+            buffer.write(data, 0, nRead);
         }
-        
-        // Create cache key
-        String cacheKey = base64Image.substring(0, Math.min(100, base64Image.length())) + 
-                         "_" + mimeType + "_" + prompt.hashCode();
-        
-        // Check cache
-        CompletableFuture<String> cachedFuture = requestCache.get(cacheKey);
-        if (cachedFuture != null && !cachedFuture.isCompletedExceptionally()) {
-            return cachedFuture;
-        }
-        
-        // Wait if we're at max concurrent requests
-        while (activeRequests.get() >= maxConcurrentRequests) {
-            try {
-                Thread.sleep(100);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return CompletableFuture.failedFuture(e);
-            }
-        }
-        
-        activeRequests.incrementAndGet();
-        
-        CompletableFuture<String> future = callVisionAPIAsync(base64Image, mimeType)
-            .handle((result, error) -> {
-                activeRequests.decrementAndGet();
-                if (error != null) {
-                    requestCache.remove(cacheKey);
-                    throw new CompletionException(error);
-                }
-                return result;
-            });
-        
-        requestCache.put(cacheKey, future);
-        return future;
+        return buffer.toByteArray();
     }
 
-    /**
-     * Batch analyze multiple images asynchronously
-     */
-    public CompletableFuture<List<String>> analyzeImagesAsync(List<byte[]> images, List<Metadata> metadataList) {
-        List<CompletableFuture<String>> futures = new ArrayList<>();
+    private String callVisionAPI(String base64Image, String mimeType) throws Exception {
+        HttpRequest request;
+        String requestBody;
         
-        for (int i = 0; i < images.size(); i++) {
-            Metadata metadata = (metadataList != null && i < metadataList.size()) 
-                ? metadataList.get(i) : new Metadata();
-            futures.add(analyzeImageAsync(images.get(i), metadata));
-        }
-        
-        return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
-            .thenApply(v -> futures.stream()
-                .map(CompletableFuture::join)
-                .collect(ArrayList::new, ArrayList::add, ArrayList::addAll));
-    }
-
-    private CompletableFuture<String> callVisionAPIAsync(String base64Image, String mimeType) {
-        return CompletableFuture.supplyAsync(() -> {
-            try {
-                return callVisionAPIWithRetry(base64Image, mimeType, 0);
-            } catch (Exception e) {
-                throw new CompletionException(e);
-            }
-        }, executorService);
-    }
-
-    private String callVisionAPIWithRetry(String base64Image, String mimeType, int attempt) 
-            throws Exception {
         try {
-            HttpRequest request;
-            String requestBody;
-            
             if ("openai".equalsIgnoreCase(provider)) {
                 requestBody = buildOpenAIRequest(base64Image, mimeType);
                 request = HttpRequest.newBuilder()
@@ -340,32 +314,32 @@ public class AsyncVisionLanguageModelParser extends AbstractParser {
                     .build();
             }
 
-            // Try async call with regular HTTP client first
-            CompletableFuture<HttpResponse<String>> responseFuture = 
-                httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString());
-            
             HttpResponse<String> response;
             try {
-                response = responseFuture.get(timeout, TimeUnit.SECONDS);
-                System.out.println("Successfully connected with secure HTTP client (async)");
+                response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+                LOGGER.debug("Successfully connected with secure HTTP client");
             } catch (Exception e) {
-                System.err.println("Secure HTTP client failed: " + e.getMessage());
-                System.err.println("Falling back to unsafe HTTP client...");
+                LOGGER.warn("Secure HTTP client failed: {}", e.getMessage());
+                LOGGER.info("Falling back to unsafe HTTP client...");
                 
-                // Try with unsafe HTTP client
-                responseFuture = getUnsafeHttpClient()
-                    .sendAsync(request, HttpResponse.BodyHandlers.ofString());
-                response = responseFuture.get(timeout, TimeUnit.SECONDS);
-                System.out.println("Successfully connected with unsafe HTTP client (async)");
-            }
-            
-            // Check for rate limiting or temporary errors
-            if (response.statusCode() == 429 || response.statusCode() == 503) {
-                if (attempt < retryAttempts) {
-                    long delay = retryDelayMs * (attempt + 1);
-                    System.out.println("Rate limited or service unavailable. Retrying in " + delay + "ms...");
-                    Thread.sleep(delay);
-                    return callVisionAPIWithRetry(base64Image, mimeType, attempt + 1);
+                try {
+                    response = getUnsafeHttpClient().send(request, HttpResponse.BodyHandlers.ofString());
+                    LOGGER.info("Successfully connected with unsafe HTTP client");
+                } catch (Exception unsafeException) {
+                    String errorMsg = "Both secure and unsafe HTTP clients failed:\n";
+                    errorMsg += "Secure client error: " + e.getMessage() + "\n";
+                    errorMsg += "Unsafe client error: " + unsafeException.getMessage() + "\n";
+                    
+                    if (e instanceof javax.net.ssl.SSLHandshakeException) {
+                        errorMsg += "\nSSL Handshake failed when connecting to " + apiEndpoint + ". ";
+                        errorMsg += "Possible causes: \n";
+                        errorMsg += "1. Behind a corporate proxy (set -Dhttps.proxyHost and -Dhttps.proxyPort)\n";
+                        errorMsg += "2. Outdated Java version (requires Java 11+)\n";
+                        errorMsg += "3. Missing CA certificates in trust store\n";
+                        errorMsg += "4. Network firewall blocking HTTPS traffic\n";
+                    }
+                    
+                    throw new TikaException(errorMsg, e);
                 }
             }
             
@@ -376,60 +350,11 @@ public class AsyncVisionLanguageModelParser extends AbstractParser {
     
             return parseAPIResponse(response.body());
             
+        } catch (TikaException e) {
+            throw e;
         } catch (Exception e) {
-            if (attempt < retryAttempts && !(e instanceof TikaException)) {
-                long delay = retryDelayMs * (attempt + 1);
-                System.err.println("API call failed: " + e.getMessage() + ". Retrying in " + delay + "ms...");
-                try {
-                    Thread.sleep(delay);
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    throw new TikaException("Interrupted during retry", ie);
-                }
-                return callVisionAPIWithRetry(base64Image, mimeType, attempt + 1);
-            }
-            throw new TikaException("Failed to call VLM API after " + (attempt + 1) + " attempts", e);
+            throw new TikaException("Failed to call VLM API: " + e.getMessage(), e);
         }
-    }
-
-    private void writeOutput(ContentHandler handler, Metadata metadata, String analysis) 
-            throws SAXException {
-        // Parse and output results
-        XHTMLContentHandler xhtml = new XHTMLContentHandler(handler, metadata);
-        xhtml.startDocument();
-        
-        // Add VLM analysis as structured content
-        xhtml.startElement("div", "class", "vlm-analysis");
-        xhtml.startElement("h2");
-        xhtml.characters("Vision Language Model Analysis");
-        xhtml.endElement("h2");
-        
-        // Add the analysis text
-        xhtml.startElement("p");
-        xhtml.characters(analysis);
-        xhtml.endElement("p");
-        
-        // Add metadata
-        metadata.add("vlm_provider", provider);
-        metadata.add("vlm_model", modelName);
-        metadata.add("vlm_prompt", prompt);
-        metadata.add("vlm_analysis", analysis);
-        
-        // Extract and add specific elements if found
-        extractAndAddEntities(analysis, metadata, xhtml);
-        
-        xhtml.endElement("div");
-        xhtml.endDocument();
-    }
-
-    private byte[] readInputStream(InputStream stream) throws IOException {
-        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-        int nRead;
-        byte[] data = new byte[16384];
-        while ((nRead = stream.read(data, 0, data.length)) != -1) {
-            buffer.write(data, 0, nRead);
-        }
-        return buffer.toByteArray();
     }
 
     private String buildOpenAIRequest(String base64Image, String mimeType) 
@@ -443,12 +368,10 @@ public class AsyncVisionLanguageModelParser extends AbstractParser {
         
         ArrayNode content = message.putArray("content");
         
-        // Add text prompt
         ObjectNode textContent = content.addObject();
         textContent.put("type", "text");
         textContent.put("text", prompt);
         
-        // Add image
         ObjectNode imageContent = content.addObject();
         imageContent.put("type", "image_url");
         ObjectNode imageUrl = imageContent.putObject("image_url");
@@ -471,7 +394,6 @@ public class AsyncVisionLanguageModelParser extends AbstractParser {
         
         ArrayNode content = message.putArray("content");
         
-        // Add image
         ObjectNode imageContent = content.addObject();
         imageContent.put("type", "image");
         ObjectNode source = imageContent.putObject("source");
@@ -479,7 +401,6 @@ public class AsyncVisionLanguageModelParser extends AbstractParser {
         source.put("media_type", mimeType);
         source.put("data", base64Image);
         
-        // Add text prompt
         ObjectNode textContent = content.addObject();
         textContent.put("type", "text");
         textContent.put("text", prompt);
@@ -512,7 +433,6 @@ public class AsyncVisionLanguageModelParser extends AbstractParser {
                 }
             }
         } else {
-            // Try OpenAI format first, then Anthropic
             String result = null;
             try {
                 JsonNode choices = root.get("choices");
@@ -520,7 +440,6 @@ public class AsyncVisionLanguageModelParser extends AbstractParser {
                     result = choices.get(0).get("message").get("content").asText();
                 }
             } catch (Exception e) {
-                // Try Anthropic format
                 JsonNode content = root.get("content");
                 if (content != null && content.size() > 0) {
                     result = content.get(0).get("text").asText();
@@ -535,20 +454,17 @@ public class AsyncVisionLanguageModelParser extends AbstractParser {
     private void extractAndAddEntities(String analysis, Metadata metadata, 
                                       XHTMLContentHandler xhtml) 
             throws SAXException {
-        // Extract potential text found in image
         if (analysis.toLowerCase().contains("text:") || 
             analysis.toLowerCase().contains("writing:")) {
             metadata.add("extracted_text_from_vision", "true");
         }
         
-        // Extract object detection results
         if (analysis.toLowerCase().contains("object") || 
             analysis.toLowerCase().contains("person") ||
             analysis.toLowerCase().contains("animal")) {
             metadata.add("objects_detected", "true");
         }
         
-        // Add structured sections if identifiable
         String[] lines = analysis.split("\n");
         boolean inList = false;
         
@@ -576,48 +492,11 @@ public class AsyncVisionLanguageModelParser extends AbstractParser {
             xhtml.endElement("ul");
         }
     }
-
-    /**
-     * Cleanup method to shutdown executor service
-     */
-    public void shutdown() {
-        executorService.shutdown();
-        try {
-            if (!executorService.awaitTermination(60, TimeUnit.SECONDS)) {
-                executorService.shutdownNow();
-            }
-        } catch (InterruptedException e) {
-            executorService.shutdownNow();
-            Thread.currentThread().interrupt();
-        }
-    }
-
-    // Getters and setters for configuration
-    public void setMaxConcurrentRequests(int maxConcurrentRequests) {
-        this.maxConcurrentRequests = maxConcurrentRequests;
-    }
-
-    public void setRetryAttempts(int retryAttempts) {
-        this.retryAttempts = retryAttempts;
-    }
-
-    public void setRetryDelayMs(long retryDelayMs) {
-        this.retryDelayMs = retryDelayMs;
-    }
-
-    public int getActiveRequests() {
-        return activeRequests.get();
-    }
-
-    public void clearCache() {
-        requestCache.clear();
-    }
 }
 
 class UnsafeHttpClient {
-    public static HttpClient createUnsafeClient(ExecutorService executor) {
+    public static HttpClient createUnsafeClient() {
         try {
-            // Create a trust manager that accepts all certificates
             TrustManager[] trustAllCerts = new TrustManager[] {
                 new X509TrustManager() {
                     public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
@@ -629,22 +508,13 @@ class UnsafeHttpClient {
             SSLContext sslContext = SSLContext.getInstance("TLS");
             sslContext.init(null, trustAllCerts, new SecureRandom());
             
-            HttpClient.Builder builder = HttpClient.newBuilder()
+            return HttpClient.newBuilder()
                 .sslContext(sslContext)
-                .connectTimeout(Duration.ofSeconds(10));
-            
-            if (executor != null) {
-                builder.executor(executor);
-            }
-            
-            return builder.build();
+                .connectTimeout(Duration.ofSeconds(10))
+                .build();
                 
         } catch (Exception e) {
             throw new RuntimeException("Failed to create unsafe HTTP client", e);
         }
-    }
-    
-    public static HttpClient createUnsafeClient() {
-        return createUnsafeClient(null);
     }
 }

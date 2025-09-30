@@ -72,3 +72,16 @@
         <queueSize>100</queueSize>
     </async>
 </properties>
+
+
+
+
+<parser class="org.apache.tika.parser.async.AsyncParser">
+  <params>
+    <param name="corePoolSize" type="int">4</param>
+    <param name="maxPoolSize" type="int">8</param>
+    <param name="wrappedParserClass" type="string">
+      org.apache.tika.parser.DefaultParser
+    </param>
+  </params>
+</parser>

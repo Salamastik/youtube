@@ -217,51 +217,35 @@ public class VisionLanguageModelParser extends AbstractParser {
 
     @Override
     public void parse(InputStream stream, ContentHandler handler,
-                     Metadata metadata, ParseContext context)
+                    Metadata metadata, ParseContext context)
             throws IOException, SAXException, TikaException {
-        
+
         if (apiKey == null || apiEndpoint == null) {
             throw new TikaException("VLM API not configured. Set TIKA_VLM_API_KEY and TIKA_VLM_ENDPOINT");
         }
 
         byte[] imageData = readInputStream(stream);
-        
         if (imageData.length > maxImageSize) {
             throw new TikaException("Image size exceeds maximum allowed size of " + maxImageSize + " bytes");
         }
 
-        String base64Image = Base64.getEncoder().encodeToString(imageData);
-        
         String mimeType = metadata.get(Metadata.CONTENT_TYPE);
-        if (mimeType == null) {
-            mimeType = "image/jpeg";
-        }
+        if (mimeType == null) mimeType = "image/jpeg";
 
         try {
             LOGGER.info("start");
-            // String analysis = callVisionAPI(base64Image, mimeType);
+            // בפועל: קראי למודל שלך. לבדיקות נשאיר:
             String analysis = "HI VISION";
-            XHTMLContentHandler xhtml = new XHTMLContentHandler(handler, metadata);
-            xhtml.startDocument();
-            
-            xhtml.startElement("div", "class", "vlm-analysis");
-            xhtml.startElement("h2");
-            xhtml.characters("Vision Language Model Analysis");
-            xhtml.endElement("h2");
-            
-            xhtml.startElement("p");
-            xhtml.characters(analysis);
-            xhtml.endElement("p");
-            
-            metadata.add("vlm_provider", provider);
-            metadata.add("vlm_model", modelName);
-            metadata.add("vlm_prompt", prompt);
-            metadata.add("vlm_analysis", analysis);
-                        
-            xhtml.endElement("div");
-            xhtml.endDocument();
+
+            // *** כותבים רק למטה-דאטה של ה-embedded ***
+            metadata.set("vlm:provider", provider);
+            metadata.set("vlm:model", modelName);
+            metadata.set("vlm:prompt", prompt);
+            metadata.set("vlm:analysis", analysis);
+
             LOGGER.info("END");
         } catch (Exception e) {
+            metadata.set("vlm:error", e.getClass().getSimpleName() + ": " + e.getMessage());
             throw new TikaException("Failed to analyze image with VLM", e);
         }
     }

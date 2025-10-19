@@ -34,7 +34,6 @@ jobs:
         mv VisionLanguageModelParser.java src/main/java/org/apache/tika/parser/vision/
         mkdir -p src/main/java/org/apache/tika/parallel
         mv ParallelEmbeddedDocumentExtractorFactory.java src/main/java/org/apache/tika/parallel
-        mv ParallelizingParserDecorator.java src/main/java/org/apache/tika/parallel
         # Create minimal pom.xml if it does not exist
         if [ ! -f pom.xml ]; then
           cat <<EOF > pom.xml

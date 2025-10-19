@@ -22,16 +22,16 @@ public class ParallelizingParserDecorator extends ParserDecorator {
 
     // הזרקת ה-Factory כך שכל embedded ילך דרך המקבילי
     context.set(org.apache.tika.extractor.EmbeddedDocumentExtractorFactory.class,
-                new com.example.tika.parallel.ParallelEmbeddedDocumentExtractorFactory());
+                new org.apache.tika.parallel.ParallelEmbeddedDocumentExtractorFactory());
 
     try {
       super.parse(stream, handler, metadata, context);
     } finally {
       // ניקוז התוצאות ל-handler הראשי (בטוח-Thread)
-      var ex = com.example.tika.parallel.ParallelEmbeddedDocumentExtractorFactory.CURRENT.get();
+      var ex =org.apache.tika.parallel.ParallelEmbeddedDocumentExtractorFactory.CURRENT.get();
       if (ex != null) {
         ex.drainTo(handler, metadata);
-        com.example.tika.parallel.ParallelEmbeddedDocumentExtractorFactory.CURRENT.remove();
+        org.apache.tika.parallel.ParallelEmbeddedDocumentExtractorFactory.CURRENT.remove();
       }
     }
   }

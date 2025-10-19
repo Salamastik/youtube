@@ -234,8 +234,8 @@ public class VisionLanguageModelParser extends AbstractParser {
 
         try {
             LOGGER.info("start");
-            // בפועל: קראי למודל שלך. לבדיקות נשאיר:
-            String analysis = "HI VISION";
+            String analysis = callVisionAPI(base64Image, mimeType);
+            // String analysis = "HI VISION";
 
             // *** כותבים רק למטה-דאטה של ה-embedded ***
             metadata.set("vlm:provider", provider);

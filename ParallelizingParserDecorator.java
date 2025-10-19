@@ -6,6 +6,7 @@ import org.apache.tika.metadata.Metadata;
 import org.apache.tika.parser.DefaultParser;
 import org.apache.tika.parser.ParseContext;
 import org.apache.tika.parser.ParserDecorator;
+import org.apache.tika.sax.ContentHandlerDecorator;
 import org.xml.sax.ContentHandler;
 import org.xml.sax.SAXException;
 
@@ -22,16 +23,21 @@ public class ParallelizingParserDecorator extends ParserDecorator {
                       Metadata metadata, ParseContext context)
             throws IOException, SAXException, TikaException {
 
-        // מזריקים את ה-Factory שלנו לפרסינג של embedded
+        // מזריקים את ה-Factory שיריץ את ה-embedded בפרלליות ויצבור תוצאות
         context.set(org.apache.tika.extractor.EmbeddedDocumentExtractorFactory.class,
                 new ParallelEmbeddedDocumentExtractorFactory());
 
-        try {
-            super.parse(stream, handler, metadata, context);
-        } finally {
-            // נקודת הסיום: לכתוב את בלוקי ה-XHTML שסיכמנו מכל התמונות
-            ParallelEmbeddedDocumentExtractorFactory.drainTo(handler);
-        }
+        // עוטפים את ה-handler כדי "להתפרץ" רגע לפני endDocument()
+        ContentHandler injectingHandler = new ContentHandlerDecorator(handler) {
+            @Override
+            public void endDocument() throws SAXException {
+                // לכתוב את בלוקי ה-XHTML לפני שסוגרים את המסמך
+                ParallelEmbeddedDocumentExtractorFactory.drainTo(getContentHandler());
+                super.endDocument();
+            }
+        };
+
+        // מעבירים את ה-handler העטוף ל-parser האמיתי
+        super.parse(stream, injectingHandler, metadata, context);
     }
 }
-

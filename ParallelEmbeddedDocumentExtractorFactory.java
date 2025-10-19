@@ -22,7 +22,7 @@ import java.util.concurrent.*;
 
 /**
  * מריץ embedded parsing במקביל, אוסף Metadata של כל תמונה,
- * וב-drain כותב בלוקי XHTML למסמך הראשי (ל-/tika).
+ * וב-drain כותב בלוקי XHTML למסמך הראשי (ל-/tika) – עם לוגים.
  */
 public class ParallelEmbeddedDocumentExtractorFactory implements EmbeddedDocumentExtractorFactory {
 
@@ -46,15 +46,20 @@ public class ParallelEmbeddedDocumentExtractorFactory implements EmbeddedDocumen
                 ? context.get(Parser.class)
                 : new AutoDetectParser();
 
-        // שומרים delegate עבור shouldParseEmbedded
         final ParsingEmbeddedDocumentExtractor delegate =
                 new ParsingEmbeddedDocumentExtractor(context);
+
+        System.err.println("[Factory] newInstance() – parser=" + embeddedParser.getClass().getName());
 
         return new EmbeddedDocumentExtractor() {
 
             @Override
             public boolean shouldParseEmbedded(Metadata metadata) {
-                return delegate.shouldParseEmbedded(metadata);
+                boolean should = delegate.shouldParseEmbedded(metadata);
+                if (!should) {
+                    System.err.println("[Factory] shouldParseEmbedded=false for " + metadata.get("resourceName"));
+                }
+                return should;
             }
 
             @Override
@@ -62,34 +67,39 @@ public class ParallelEmbeddedDocumentExtractorFactory implements EmbeddedDocumen
                                       ContentHandler handler,
                                       Metadata metadata,
                                       boolean outputHtml) throws SAXException {
-                // קוראים את הזרם לבייטים כדי לאפשר ריצה מאוחרת/מקבילית
+
                 final byte[] data;
                 try (InputStream is = stream) {
                     data = is.readAllBytes();
                 } catch (IOException e) {
-                    // עדיין נוסיף משימה שמסמנת שגיאה ל-metadata
                     final Metadata mdErr = metadata;
                     Future<Metadata> fut = POOL.submit(() -> {
                         mdErr.add("vlm:error", "read-bytes-failed");
                         return mdErr;
                     });
                     FUTURES.get().add(fut);
+                    System.err.println("[Factory] parseEmbedded: readAllBytes() FAILED for " +
+                            metadata.get("resourceName"));
                     return;
                 }
 
-                // קיבוע כל המשתנים שנכנסים ל-lambda כ-final
                 final Parser p = embeddedParser;
                 final ParseContext ctx = context;
                 final Metadata md = metadata;
 
-                // המשימה: להריץ את ה-parser של ה-embedded (שיקרא ל-VLM ויכתוב ל-Metadata)
                 Callable<Metadata> task = () -> {
+                    String name = md.get("resourceName");
+                    if (name == null) name = md.get("X-TIKA:embedded_resource_path");
+                    System.err.println("[Factory] task START for " + name +
+                            " (thread=" + Thread.currentThread().getName() + ")");
                     try (ByteArrayInputStream bais = new ByteArrayInputStream(data)) {
-                        // שימי לב: handler כאן הוא DefaultHandler – לא כותבים ל-XHTML מתוך ת'רד!
                         p.parse(bais, new DefaultHandler(), md, ctx);
                     } catch (Exception e) {
                         md.add("vlm:error", "parseEmbedded-failed: " + e.getClass().getSimpleName());
+                        System.err.println("[Factory] task ERROR for " + name + " : " + e.getMessage());
                     }
+                    System.err.println("[Factory] task END for " + name +
+                            ", vlm:analysis=" + md.get("vlm:analysis"));
                     return md;
                 };
 
@@ -99,34 +109,51 @@ public class ParallelEmbeddedDocumentExtractorFactory implements EmbeddedDocumen
         };
     }
 
-    /** לקרוא מזה *אחרי* שה-parser הראשי סיים (בת'רד הראשי) */
+    /** לקרוא מזה *אחרי* שה-parser הראשי התחיל לייצר HTML; העוטף שלנו קורא בזמן startElement/body */
     public static void drainTo(ContentHandler mainHandler) throws SAXException {
         final List<Future<Metadata>> futures = FUTURES.get();
+        System.err.println("[Factory] drainTo() – futures.size=" + futures.size());
+
         for (Future<Metadata> f : futures) {
             final Metadata md;
             try {
                 md = f.get(60, TimeUnit.SECONDS);
             } catch (Exception e) {
+                System.err.println("[Factory] drainTo() – future get() FAILED: " + e.getMessage());
                 continue;
             }
+
             final String analysis = md.get("vlm:analysis");
-            if (analysis == null) continue;
-
-            // כתיבה בטוחה ל-XHTML (בת'רד הראשי בלבד)
-            mainHandler.startElement("", "div", "div", attrs("class", "vlm-result"));
-            element(mainHandler, "h3", "Vision Language Model Analysis");
-            element(mainHandler, "p", analysis);
-
             final String provider = md.get("vlm:provider");
             final String model = md.get("vlm:model");
+
+            String name = md.get("resourceName");
+            if (name == null) name = md.get("X-TIKA:embedded_resource_path");
+
+            if (analysis == null) {
+                System.err.println("[Factory] drainTo() – no vlm:analysis for " + name);
+                continue;
+            }
+
+            // כתיבה בטוחה ל-XHTML (בת'רד הראשי)
+            mainHandler.startElement("", "div", "div", attrs("class", "vlm-result"));
+            element(mainHandler, "h3", "Vision Language Model Analysis");
+            if (name != null) {
+                element(mainHandler, "p", "image=" + name);
+            }
+            element(mainHandler, "p", analysis);
             if (provider != null || model != null) {
                 element(mainHandler, "p",
                         "provider=" + String.valueOf(provider) + ", model=" + String.valueOf(model));
             }
             mainHandler.endElement("", "div", "div");
+
+            System.err.println("[Factory] drainTo() – injected block for " + name);
         }
+
         futures.clear();
         FUTURES.remove();
+        System.err.println("[Factory] drainTo() – done");
     }
 
     private static AttributesImpl attrs(String... kv) {

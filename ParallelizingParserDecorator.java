@@ -39,11 +39,11 @@ public class ParallelizingParserDecorator extends ParserDecorator {
             public void endElement(String uri, String localName, String qName) throws SAXException {
                 // לפני שסוגרים את <body> פעם ראשונה – נזריק את הבלוקים
                 if (!injected && "body".equals(localName)) {
-                    System.err.println(localName)
-                    System.err.println(this)
-                    System.err.println("injecting VLM blocks...")
+                    System.err.println(localName);
+                    System.err.println(this);
+                    System.err.println("injecting VLM blocks...");
                     ParallelEmbeddedDocumentExtractorFactory.drainTo(this);
-                    System.err.println("injecting VLM blocks... 2")
+                    System.err.println("injecting VLM blocks... 2");
                     injected = true;
                 }
                 super.endElement(uri, localName, qName);

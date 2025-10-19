@@ -11,6 +11,7 @@ import org.apache.tika.parser.Parser;
 import org.xml.sax.ContentHandler;
 import org.xml.sax.SAXException;
 import org.xml.sax.helpers.AttributesImpl;
+import org.xml.sax.helpers.DefaultHandler;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -20,85 +21,104 @@ import java.util.List;
 import java.util.concurrent.*;
 
 /**
- * Factory שמריץ embedded parsing במקביל,
- * אוסף את ה-Metadata של כל תמונה, וב-drain כותב XHTML לסיכום ל-handler הראשי.
+ * מריץ embedded parsing במקביל, אוסף Metadata של כל תמונה,
+ * וב-drain כותב בלוקי XHTML למסמך הראשי (ל-/tika).
  */
 public class ParallelEmbeddedDocumentExtractorFactory implements EmbeddedDocumentExtractorFactory {
 
-    // futures פר-מסמך (ThreadLocal) כדי לאסוף משימות
     private static final ThreadLocal<List<Future<Metadata>>> FUTURES =
             ThreadLocal.withInitial(ArrayList::new);
 
-    // ברירת מחדל: 8 ת'רדים (או CPU)
     private static final int MAX_PARALLEL =
             Math.max(8, Runtime.getRuntime().availableProcessors());
+
     private static final ExecutorService POOL =
-            new ThreadPoolExecutor(MAX_PARALLEL, MAX_PARALLEL,
+            new ThreadPoolExecutor(
+                    MAX_PARALLEL, MAX_PARALLEL,
                     30, TimeUnit.SECONDS,
                     new LinkedBlockingQueue<>(1024),
-                    new ThreadPoolExecutor.CallerRunsPolicy());
+                    new ThreadPoolExecutor.CallerRunsPolicy()
+            );
 
     @Override
     public EmbeddedDocumentExtractor newInstance(Metadata parentMd, ParseContext context) {
-        Parser embeddedParser = context.get(Parser.class);
-        if (embeddedParser == null) embeddedParser = new AutoDetectParser();
-        ParsingEmbeddedDocumentExtractor delegate = new ParsingEmbeddedDocumentExtractor(context);
+        final Parser embeddedParser = context.get(Parser.class) != null
+                ? context.get(Parser.class)
+                : new AutoDetectParser();
+
+        // שומרים delegate עבור shouldParseEmbedded
+        final ParsingEmbeddedDocumentExtractor delegate =
+                new ParsingEmbeddedDocumentExtractor(context);
 
         return new EmbeddedDocumentExtractor() {
+
             @Override
             public boolean shouldParseEmbedded(Metadata metadata) {
                 return delegate.shouldParseEmbedded(metadata);
             }
 
             @Override
-            public void parseEmbedded(InputStream stream, ContentHandler handler,
-                                      Metadata metadata, boolean outputHtml)
-                    throws SAXException {
-
+            public void parseEmbedded(InputStream stream,
+                                      ContentHandler handler,
+                                      Metadata metadata,
+                                      boolean outputHtml) throws SAXException {
                 // קוראים את הזרם לבייטים כדי לאפשר ריצה מאוחרת/מקבילית
-                byte[] bytes;
+                final byte[] data;
                 try (InputStream is = stream) {
-                    bytes = is.readAllBytes();
+                    data = is.readAllBytes();
                 } catch (IOException e) {
-                    bytes = new byte[0];
+                    // עדיין נוסיף משימה שמסמנת שגיאה ל-metadata
+                    final Metadata mdErr = metadata;
+                    Future<Metadata> fut = POOL.submit(() -> {
+                        mdErr.add("vlm:error", "read-bytes-failed");
+                        return mdErr;
+                    });
+                    FUTURES.get().add(fut);
+                    return;
                 }
 
-                // משימה שמריצה את ה-parser של ה-embedded (זה יקרא ל-VLM שלך
-                // ששמנו לכתוב ל-Metadata בלבד)
+                // קיבוע כל המשתנים שנכנסים ל-lambda כ-final
+                final Parser p = embeddedParser;
+                final ParseContext ctx = context;
+                final Metadata md = metadata;
+
+                // המשימה: להריץ את ה-parser של ה-embedded (שיקרא ל-VLM ויכתוב ל-Metadata)
                 Callable<Metadata> task = () -> {
-                    try (InputStream is = new ByteArrayInputStream(bytes)) {
-                        embeddedParser.parse(is, new org.xml.sax.helpers.DefaultHandler(), metadata, context);
-                    } catch (Exception ignore) {
-                        metadata.add("vlm:error", "parseEmbedded-failed");
+                    try (ByteArrayInputStream bais = new ByteArrayInputStream(data)) {
+                        // שימי לב: handler כאן הוא DefaultHandler – לא כותבים ל-XHTML מתוך ת'רד!
+                        p.parse(bais, new DefaultHandler(), md, ctx);
+                    } catch (Exception e) {
+                        md.add("vlm:error", "parseEmbedded-failed: " + e.getClass().getSimpleName());
                     }
-                    return metadata; // ה-Metadata מכיל vlm:analysis וכו'
+                    return md;
                 };
 
-                FUTURES.get().add(POOL.submit(task));
+                Future<Metadata> fut = POOL.submit(task);
+                FUTURES.get().add(fut);
             }
         };
     }
 
-    /** לקרוא מזה אחרי שה-parser הראשי סיים (בת'רד הראשי) */
+    /** לקרוא מזה *אחרי* שה-parser הראשי סיים (בת'רד הראשי) */
     public static void drainTo(ContentHandler mainHandler) throws SAXException {
-        List<Future<Metadata>> futures = FUTURES.get();
+        final List<Future<Metadata>> futures = FUTURES.get();
         for (Future<Metadata> f : futures) {
-            Metadata md;
+            final Metadata md;
             try {
                 md = f.get(60, TimeUnit.SECONDS);
             } catch (Exception e) {
                 continue;
             }
-            String analysis = md.get("vlm:analysis");
+            final String analysis = md.get("vlm:analysis");
             if (analysis == null) continue;
 
-            // כותבים בלוק XHTML לתוצאה (בטוח-Thread, בת'רד הראשי)
+            // כתיבה בטוחה ל-XHTML (בת'רד הראשי בלבד)
             mainHandler.startElement("", "div", "div", attrs("class", "vlm-result"));
             element(mainHandler, "h3", "Vision Language Model Analysis");
             element(mainHandler, "p", analysis);
-            // אופציונלי: ספק/מודל/פרומפט
-            String provider = md.get("vlm:provider");
-            String model = md.get("vlm:model");
+
+            final String provider = md.get("vlm:provider");
+            final String model = md.get("vlm:model");
             if (provider != null || model != null) {
                 element(mainHandler, "p",
                         "provider=" + String.valueOf(provider) + ", model=" + String.valueOf(model));
@@ -125,5 +145,3 @@ public class ParallelEmbeddedDocumentExtractorFactory implements EmbeddedDocumen
         h.endElement("", tag, tag);
     }
 }
-
-

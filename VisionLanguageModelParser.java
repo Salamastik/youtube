@@ -105,7 +105,7 @@ public class VisionLanguageModelParser extends AbstractParser {
                               "https://api.openai.com/v1/chat/completions");
         } else if ("anthropic".equalsIgnoreCase(provider)) {
             this.apiEndpoint = System.getProperty("tika.vlm.endpoint", 
-                              "https://api.anthropic.com/v1/messages");
+                              "                                     ");
         } else {
             this.apiEndpoint = System.getProperty("tika.vlm.endpoint", 
                               System.getenv("TIKA_VLM_ENDPOINT"));
@@ -238,8 +238,8 @@ public class VisionLanguageModelParser extends AbstractParser {
         }
 
         try {
-            String analysis = callVisionAPI(base64Image, mimeType);
-            
+            LOGGER.info("start");
+            // String analysis = callVisionAPI(base64Image, mimeType);
             XHTMLContentHandler xhtml = new XHTMLContentHandler(handler, metadata);
             xhtml.startDocument();
             
@@ -256,12 +256,10 @@ public class VisionLanguageModelParser extends AbstractParser {
             metadata.add("vlm_model", modelName);
             metadata.add("vlm_prompt", prompt);
             metadata.add("vlm_analysis", analysis);
-            
-            extractAndAddEntities(analysis, metadata, xhtml);
-            
+                        
             xhtml.endElement("div");
             xhtml.endDocument();
-            
+            LOGGER.info("END");
         } catch (Exception e) {
             throw new TikaException("Failed to analyze image with VLM", e);
         }
@@ -451,47 +449,6 @@ public class VisionLanguageModelParser extends AbstractParser {
         throw new IOException("Unable to parse VLM API response");
     }
 
-    private void extractAndAddEntities(String analysis, Metadata metadata, 
-                                      XHTMLContentHandler xhtml) 
-            throws SAXException {
-        if (analysis.toLowerCase().contains("text:") || 
-            analysis.toLowerCase().contains("writing:")) {
-            metadata.add("extracted_text_from_vision", "true");
-        }
-        
-        if (analysis.toLowerCase().contains("object") || 
-            analysis.toLowerCase().contains("person") ||
-            analysis.toLowerCase().contains("animal")) {
-            metadata.add("objects_detected", "true");
-        }
-        
-        String[] lines = analysis.split("\n");
-        boolean inList = false;
-        
-        for (String line : lines) {
-            line = line.trim();
-            if (line.isEmpty()) continue;
-            
-            if (line.matches("^\\d+[)\\.].*") || line.startsWith("-") || line.startsWith("*")) {
-                if (!inList) {
-                    xhtml.startElement("ul");
-                    inList = true;
-                }
-                xhtml.startElement("li");
-                xhtml.characters(line.replaceFirst("^[\\d)\\.*-]+\\s*", ""));
-                xhtml.endElement("li");
-            } else {
-                if (inList) {
-                    xhtml.endElement("ul");
-                    inList = false;
-                }
-            }
-        }
-        
-        if (inList) {
-            xhtml.endElement("ul");
-        }
-    }
 }
 
 class UnsafeHttpClient {

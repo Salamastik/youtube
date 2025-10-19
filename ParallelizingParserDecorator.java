@@ -23,21 +23,22 @@ public class ParallelizingParserDecorator extends ParserDecorator {
                       Metadata metadata, ParseContext context)
             throws IOException, SAXException, TikaException {
 
-        // מזריקים את ה-Factory שיריץ את ה-embedded בפרלליות ויצבור תוצאות
+        // מזריקים את ה-Factory שיריץ embedded בפרלליות ויצבור תוצאות
         context.set(org.apache.tika.extractor.EmbeddedDocumentExtractorFactory.class,
                 new ParallelEmbeddedDocumentExtractorFactory());
 
-        // עוטפים את ה-handler כדי "להתפרץ" רגע לפני endDocument()
+        // עוטפים את ה-handler כדי להזריק פלט רגע לפני endDocument()
         ContentHandler injectingHandler = new ContentHandlerDecorator(handler) {
             @Override
             public void endDocument() throws SAXException {
-                // לכתוב את בלוקי ה-XHTML לפני שסוגרים את המסמך
-                ParallelEmbeddedDocumentExtractorFactory.drainTo(getContentHandler());
+                // נכתוב את בלוקי ה-XHTML לפני הסגירה
+                // שימי לב: מעבירים את ה-decorator עצמו, לא getContentHandler()
+                ParallelEmbeddedDocumentExtractorFactory.drainTo(this);
                 super.endDocument();
             }
         };
 
-        // מעבירים את ה-handler העטוף ל-parser האמיתי
+        // פרסינג עם ה-handler העטוף
         super.parse(stream, injectingHandler, metadata, context);
     }
 }

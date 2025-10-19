@@ -19,17 +19,17 @@ import java.io.IOException;
 import java.io.InputStream;
 
 /**
- * Decorator שמזריק EmbeddedDocumentExtractorFactory מקבילי,
- * ואוסף את תוצאות ניתוח התמונות ומזריק אותן בסוף ה-<body>.
- * בנוסף מזריק טקסט גולמי (header/separators) כדי שייראה גם ב-/tika/text.
+ * Decorator שמזריק EmbeddedDocumentExtractorFactory מקבילי
+ * ומזריק את תוצאות ה-VLM בסוף <body>. בנוסף מזריק טקסט "גולמי"
+ * (characters) כדי שיופיע גם ב-/tika/text.
  */
 public class ParallelizingParserDecorator extends ParserDecorator {
 
     private static final Logger LOGGER =
             LoggerFactory.getLogger(ParallelizingParserDecorator.class);
 
-    // עוטפים את ה-parser המובנה של השרת לפי ה-config שכבר נטען:
     public ParallelizingParserDecorator() {
+        // להשתמש ב-AutoDetectParser של השרת כדי לרשת את ה-config הטעון
         super(new AutoDetectParser(TikaConfig.getDefaultConfig()));
         LOGGER.info("[Decorator] ctor – using AutoDetectParser with server TikaConfig");
     }
@@ -39,12 +39,11 @@ public class ParallelizingParserDecorator extends ParserDecorator {
                       Metadata metadata, ParseContext context)
             throws IOException, SAXException, TikaException {
 
-        // חגורה+שלייקס: נרשום את ה-Factory גם ל-ParseContext
+        // חגורה+שלייקס: גם דרך ה-ParseContext
         context.set(org.apache.tika.extractor.EmbeddedDocumentExtractorFactory.class,
                 new ParallelEmbeddedDocumentExtractorFactory());
         LOGGER.info("[Decorator] parse() started – factory set on ParseContext");
 
-        // נעטוף handler כדי להזריק רגע לפני </body>; עם fallback ב-endDocument
         ContentHandler injectingHandler = new ContentHandlerDecorator(handler) {
             private boolean injected = false;
 
@@ -52,9 +51,10 @@ public class ParallelizingParserDecorator extends ParserDecorator {
                 return "body".equals(localName) || "body".equals(qName);
             }
 
-            private void emitPlainText(ContentHandler h, String s) throws SAXException {
+            private void emitPlainText(String s) throws SAXException {
                 char[] arr = s.toCharArray();
-                h.characters(arr, 0, arr.length);
+                // 'this' הוא עצמו ContentHandler, זה יזרום קדימה לכל handler, כולל TextContentHandler
+                this.characters(arr, 0, arr.length);
             }
 
             @Override
@@ -68,17 +68,16 @@ public class ParallelizingParserDecorator extends ParserDecorator {
             public void endElement(String uri, String localName, String qName) throws SAXException {
                 if (!injected && isBody(localName, qName)) {
                     LOGGER.info("[Decorator] injecting at endElement </body> ...");
-                    // כותרת טקסטואלית שתופיע גם ב-/tika/text
-                    emitPlainText(getContentHandler(),
-                            System.lineSeparator() +
-                            "=== VLM ANALYSIS (begin) ===" + System.lineSeparator());
 
-                    // הזרקת הבלוקים מה-Factory (כולל XHTML+characters של התוצאות)
-                    ParallelEmbeddedDocumentExtractorFactory.drainTo(getContentHandler());
+                    // כותרות טקסטואליות שייראו גם ב-/tika/text
+                    emitPlainText(System.lineSeparator() +
+                                  "=== VLM ANALYSIS (begin) ===" + System.lineSeparator());
 
-                    emitPlainText(getContentHandler(),
-                            System.lineSeparator() +
-                            "=== VLM ANALYSIS (end) ===" + System.lineSeparator());
+                    // להעביר את ה-Decorated handler עצמו (this)
+                    ParallelEmbeddedDocumentExtractorFactory.drainTo(this);
+
+                    emitPlainText(System.lineSeparator() +
+                                  "=== VLM ANALYSIS (end) ===" + System.lineSeparator());
 
                     injected = true;
                     LOGGER.info("[Decorator] injection done at </body>");
@@ -90,25 +89,23 @@ public class ParallelizingParserDecorator extends ParserDecorator {
             public void endDocument() throws SAXException {
                 if (!injected) {
                     LOGGER.info("[Decorator] injecting at endDocument (fallback) ...");
-                    emitPlainText(getContentHandler(),
-                            System.lineSeparator() +
-                            "=== VLM ANALYSIS (begin) ===" + System.lineSeparator());
 
-                    ParallelEmbeddedDocumentExtractorFactory.drainTo(getContentHandler());
+                    emitPlainText(System.lineSeparator() +
+                                  "=== VLM ANALYSIS (begin) ===" + System.lineSeparator());
 
-                    emitPlainText(getContentHandler(),
-                            System.lineSeparator() +
-                            "=== VLM ANALYSIS (end) ===" + System.lineSeparator());
+                    ParallelEmbeddedDocumentExtractorFactory.drainTo(this);
+
+                    emitPlainText(System.lineSeparator() +
+                                  "=== VLM ANALYSIS (end) ===" + System.lineSeparator());
 
                     injected = true;
-                    LOGGER.info("[Decorator] injection done at endDocument");
+                    LOGGER.info("[Decorator] injection done at endDocument]");
                 }
                 super.endDocument();
             }
         };
 
-        // להריץ את הפרסינג עם ה-handler העטוף
-        Parser wrapped = getWrappedParser(); // זה ה-AutoDetectParser מה-ctor
+        Parser wrapped = getWrappedParser(); // AutoDetectParser מה-ctor
         wrapped.parse(stream, injectingHandler, metadata, context);
         LOGGER.info("[Decorator] parse() finished");
     }

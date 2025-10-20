@@ -19,9 +19,10 @@ import java.io.IOException;
 import java.io.InputStream;
 
 /**
- * Decorator שמזריק Factory מקבילי ומצמיד ניתוח לכל <img>.
- * בסוף המסמך מנקז כל מה שנותר.
- * עובד גם מול /tika/text (באמצעות characters()).
+ * Decorator that installs the parallel EmbeddedDocumentExtractorFactory
+ * and injects each image's VLM analysis right after its <img> element.
+ * Remaining results are drained at the end. Works with both /tika (XHTML)
+ * and /tika/text (via characters()).
  */
 public class ParallelizingParserDecorator extends ParserDecorator {
 
@@ -29,6 +30,7 @@ public class ParallelizingParserDecorator extends ParserDecorator {
             LoggerFactory.getLogger(ParallelizingParserDecorator.class);
 
     public ParallelizingParserDecorator() {
+        // Use the server's loaded TikaConfig so we respect its parser config
         super(new AutoDetectParser(TikaConfig.getDefaultConfig()));
         LOGGER.info("[Decorator] ctor – using AutoDetectParser with server TikaConfig");
     }
@@ -38,6 +40,7 @@ public class ParallelizingParserDecorator extends ParserDecorator {
                       Metadata metadata, ParseContext context)
             throws IOException, SAXException, TikaException {
 
+        // Belt and suspenders: set factory also via ParseContext
         context.set(org.apache.tika.extractor.EmbeddedDocumentExtractorFactory.class,
                 new ParallelEmbeddedDocumentExtractorFactory());
         LOGGER.info("[Decorator] parse() started – factory set on ParseContext");
@@ -45,7 +48,8 @@ public class ParallelizingParserDecorator extends ParserDecorator {
         ContentHandler injectingHandler = new ContentHandlerDecorator(handler) {
             private boolean drained = false;
 
-            private static String toResourcePath(String srcOrAlt) {
+            // NOTE: must NOT be static inside an anonymous inner class
+            private String toResourcePath(String srcOrAlt) {
                 if (srcOrAlt == null || srcOrAlt.isEmpty()) return null;
                 String p = srcOrAlt;
                 if (p.startsWith("embedded:")) p = p.substring("embedded:".length());

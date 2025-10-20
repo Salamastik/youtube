@@ -27,7 +27,7 @@ public class ParallelEmbeddedDocumentExtractorFactory implements EmbeddedDocumen
     private static final Logger LOGGER =
             LoggerFactory.getLogger(ParallelEmbeddedDocumentExtractorFactory.class);
 
-    // מקביליות קבועה (ניתן לקנפג ע"י system/env, אך ברירת־מחדל יציבה)
+    // Thread pool (configurable via TIKA_VLM_THREADS or -Dtika.vlm.threads)
     private static final int CONCURRENCY = Integer.parseInt(
             System.getProperty("tika.vlm.threads",
                     System.getenv().getOrDefault("TIKA_VLM_THREADS", "6"))
@@ -46,9 +46,9 @@ public class ParallelEmbeddedDocumentExtractorFactory implements EmbeddedDocumen
                     new ThreadPoolExecutor.CallerRunsPolicy()
             );
 
-    // futures לפי נתיב משויך לכל תמונה
+    // Futures per embedded resource path (e.g. "/image3.jpg")
     private static final ConcurrentMap<String, CompletableFuture<Metadata>> FUTURES = new ConcurrentHashMap<>();
-    // כדי לא להזריק פעמיים
+    // Tracks which results were already injected (avoid duplicates)
     private static final ConcurrentMap<String, Boolean> INJECTED = new ConcurrentHashMap<>();
 
     @Override
@@ -82,20 +82,19 @@ public class ParallelEmbeddedDocumentExtractorFactory implements EmbeddedDocumen
                     data = is.readAllBytes();
                 } catch (IOException e) {
                     LOGGER.warn("[Factory] readAllBytes FAILED for {}", metadata.get("resourceName"), e);
-                    // נרשום future שנכשל כדי שהניקוז לא יתקע
+                    // Put a completed future to keep drain stable
                     CompletableFuture<Metadata> failed = CompletableFuture.completedFuture(metadata);
                     FUTURES.putIfAbsent(normalizePath(metadata), failed);
                     return;
                 }
 
-                // עותק מטא־דאטה עצמאי למשימה
+                // Independent metadata copy for the async task
                 final Metadata mdCopy = copyMetadata(metadata);
                 final String path = normalizePath(mdCopy);
 
                 CompletableFuture<Metadata> fut = CompletableFuture.supplyAsync(() -> {
-                    String nameLog = mdCopy.get("resourceName");
                     LOGGER.info("[Factory] task START {} (thread={})",
-                            path != null ? path : nameLog, Thread.currentThread().getName());
+                            path, Thread.currentThread().getName());
                     try (ByteArrayInputStream bais = new ByteArrayInputStream(data)) {
                         embeddedParser.parse(bais, new DefaultHandler(), mdCopy, context);
                     } catch (Exception e) {
@@ -113,7 +112,7 @@ public class ParallelEmbeddedDocumentExtractorFactory implements EmbeddedDocumen
         };
     }
 
-    /** הזרקה צמודה לתמונה מסוימת (נקראת מה-Decorator אחרי <img>). */
+    /** Inject the result right after the corresponding <img>. */
     public static void injectFor(ContentHandler h, String resourcePath) throws SAXException {
         if (resourcePath == null) return;
         CompletableFuture<Metadata> fut = FUTURES.get(resourcePath);
@@ -122,14 +121,14 @@ public class ParallelEmbeddedDocumentExtractorFactory implements EmbeddedDocumen
             return;
         }
         if (INJECTED.putIfAbsent(resourcePath, Boolean.TRUE) != null) {
-            return; // כבר הוזרק
+            return; // Already injected
         }
-        Metadata md = fut.join(); // לחכות רק עבור התמונה הספציפית
+        Metadata md = fut.join(); // Wait only for this image
         writeBlock(h, resourcePath, md);
         LOGGER.info("[Factory] injected {}", resourcePath);
     }
 
-    /** ניקוז כל מה שנשאר בסוף המסמך. */
+    /** Drain any remaining results at the end of the document. */
     public static void drainRemaining(ContentHandler h) throws SAXException {
         for (Map.Entry<String, CompletableFuture<Metadata>> e : FUTURES.entrySet()) {
             final String path = e.getKey();
@@ -151,7 +150,7 @@ public class ParallelEmbeddedDocumentExtractorFactory implements EmbeddedDocumen
         return dst;
     }
 
-    /** מייצר נתיב יציב בפורמט "/imageN.ext" מתוך המטא־דאטה. */
+    /** Normalizes to "/imageN.ext" using available metadata hints. */
     private static String normalizePath(Metadata md) {
         String path = firstNonNull(
                 md.get("X-TIKA:final_embedded_resource_path"),
@@ -174,20 +173,20 @@ public class ParallelEmbeddedDocumentExtractorFactory implements EmbeddedDocumen
         return a != null ? a : (b != null ? b : c);
     }
 
-    /** כותב בלוק תוצאה גם ל-/tika (XHTML) וגם ל-/tika/text (characters). */
+    /** Writes both plain text (visible in /tika/text) and a small XHTML block (visible in /tika). */
     private static void writeBlock(ContentHandler h, String path, Metadata md) throws SAXException {
         String analysis = md.get("vlm:analysis");
         String provider = md.get("vlm:provider");
         String model = md.get("vlm:model");
 
-        // טקסט "גלמי" – יופיע גם ב-/tika/text
+        // Plain text – ensures visibility in /tika/text:
         String nl = System.lineSeparator();
         writeChars(h, nl + "=== VLM Analysis for " + path + " ===" + nl);
         if (analysis != null) writeChars(h, analysis);
         writeChars(h, nl + "[provider=" + String.valueOf(provider) +
                 ", model=" + String.valueOf(model) + "]" + nl);
 
-        // XHTML קטן ל-/tika
+        // Minimal XHTML for /tika:
         h.startElement("", "div", "div", attrs("class", "vlm-result"));
         element(h, "h3", "Vision Language Model Analysis");
         element(h, "p", "image=" + path);
